@@ -1,7 +1,7 @@
 // Copyright (c) 2017, Jonathan Chappelow
 // See LICENSE for details.
 
-package lddldataapi
+package types
 
 import (
 	"github.com/Legenddigital/lddld/lddljson"
@@ -34,24 +34,29 @@ type Tx struct {
 
 // TxShort models info about transaction TxID
 type TxShort struct {
-	TxID     string         `json:"txid"`
-	Size     int32          `json:"size"`
-	Version  int32          `json:"version"`
-	Locktime uint32         `json:"locktime"`
-	Expiry   uint32         `json:"expiry"`
+	TxID     string        `json:"txid"`
+	Size     int32         `json:"size"`
+	Version  int32         `json:"version"`
+	Locktime uint32        `json:"locktime"`
+	Expiry   uint32        `json:"expiry"`
 	Vin      []lddljson.Vin `json:"vin"`
-	Vout     []Vout         `json:"vout"`
+	Vout     []Vout        `json:"vout"`
 }
 
 // TrimmedTx models data to resemble to result of the decoderawtransaction
 // call
 type TrimmedTx struct {
-	TxID     string         `json:"txid"`
-	Version  int32          `json:"version"`
-	Locktime uint32         `json:"locktime"`
-	Expiry   uint32         `json:"expiry"`
+	TxID     string        `json:"txid"`
+	Version  int32         `json:"version"`
+	Locktime uint32        `json:"locktime"`
+	Expiry   uint32        `json:"expiry"`
 	Vin      []lddljson.Vin `json:"vin"`
-	Vout     []Vout         `json:"vout"`
+	Vout     []Vout        `json:"vout"`
+}
+
+// Txns models the multi transaction post data structure
+type Txns struct {
+	Transactions []string `json:"transactions"`
 }
 
 // VoteInfo models data about a SSGen transaction (vote)
@@ -93,14 +98,6 @@ type Vout struct {
 	N                   uint32       `json:"n"`
 	Version             uint16       `json:"version"`
 	ScriptPubKeyDecoded ScriptPubKey `json:"scriptPubKey"`
-}
-
-// VoutHexScript models the hex script for a transaction output
-type VoutHexScript struct {
-	Value           float64 `json:"value"`
-	N               uint32  `json:"n"`
-	Version         uint16  `json:"version"`
-	ScriptPubKeyHex string  `json:"scriptPubKey"`
 }
 
 // ScriptPubKey is the result of decodescript(ScriptPubKeyHex)
@@ -149,16 +146,16 @@ type Address struct {
 // AddressTxRaw is modeled from SearchRawTransactionsResult but with size in
 // place of hex
 type AddressTxRaw struct {
-	Size          int32                 `json:"size"`
-	TxID          string                `json:"txid"`
-	Version       int32                 `json:"version"`
-	Locktime      uint32                `json:"locktime"`
+	Size          int32                `json:"size"`
+	TxID          string               `json:"txid"`
+	Version       int32                `json:"version"`
+	Locktime      uint32               `json:"locktime"`
 	Vin           []lddljson.VinPrevOut `json:"vin"`
-	Vout          []Vout                `json:"vout"`
-	Confirmations int64                 `json:"confirmations"`
-	BlockHash     string                `json:"blockhash"`
-	Time          int64                 `json:"time,omitempty"`
-	Blocktime     int64                 `json:"blocktime,omitempty"`
+	Vout          []Vout               `json:"vout"`
+	Confirmations int64                `json:"confirmations"`
+	BlockHash     string               `json:"blockhash"`
+	Time          int64                `json:"time,omitempty"`
+	Blocktime     int64                `json:"blocktime,omitempty"`
 }
 
 // AddressTxShort is a subset of AddressTxRaw with just the basic tx details
@@ -169,6 +166,18 @@ type AddressTxShort struct {
 	Time          int64   `json:"time"`
 	Value         float64 `json:"value"`
 	Confirmations int64   `json:"confirmations"`
+}
+
+// AddressTotals represents the number and value of spent and unspent outputs
+// for an address.
+type AddressTotals struct {
+	Address      string  `json:"address"`
+	BlockHash    string  `json:"blockhash"`
+	BlockHeight  uint64  `json:"blockheight"`
+	NumSpent     int64   `json:"num_stxos"`
+	NumUnspent   int64   `json:"num_utxos"`
+	CoinsSpent   float64 `json:"lddl_spent"`
+	CoinsUnspent float64 `json:"lddl_unspent"`
 }
 
 // BlockDataWithTxType adds an array of TxRawWithTxType to
@@ -195,8 +204,8 @@ type TxRawWithTxType struct {
 // ScriptSig models the signature script used to redeem the origin transaction
 // as a JSON object (non-coinbase txns only)
 type ScriptSig struct {
-	Asm string `json:"asm"`
-	Hex string `json:"hex"`
+	Asm string `json:"asm,omitempty"`
+	Hex string `json:"hex,omitempty"`
 }
 
 // PrevOut represents previous output for an input Vin.
@@ -228,17 +237,28 @@ type VinPrevOut struct {
 type Status struct {
 	Ready           bool   `json:"ready"`
 	DBHeight        uint32 `json:"db_height"`
+	DBLastBlockTime int64  `json:"db_block_time"`
 	Height          uint32 `json:"node_height"`
 	NodeConnections int64  `json:"node_connections"`
 	APIVersion      int    `json:"api_version"`
-	LddldataVersion string `json:"lddldata_version"`
+	LddldataVersion  string `json:"lddldata_version"`
+}
+
+// CoinSupply models the coin supply at a certain best block.
+type CoinSupply struct {
+	Height   int64  `json:"block_height"`
+	Hash     string `json:"block_hash"`
+	Mined    int64  `json:"supply_mined"`
+	Ultimate int64  `json:"supply_ultimate"`
 }
 
 // TicketPoolInfo models data about ticket pool
 type TicketPoolInfo struct {
-	Size   uint32  `json:"size"`
-	Value  float64 `json:"value"`
-	ValAvg float64 `json:"valavg"`
+	Height  uint32   `json:"height"`
+	Size    uint32   `json:"size"`
+	Value   float64  `json:"value"`
+	ValAvg  float64  `json:"valavg"`
+	Winners []string `json:"winners"`
 }
 
 // TicketPoolValsAndSizes models two arrays, one each for ticket values and
@@ -252,14 +272,15 @@ type TicketPoolValsAndSizes struct {
 
 // BlockDataBasic models primary information about block at height Height
 type BlockDataBasic struct {
-	Height     uint32  `json:"height"`
-	Size       uint32  `json:"size"`
-	Hash       string  `json:"hash"`
-	Difficulty float64 `json:"diff"`
-	StakeDiff  float64 `json:"sdiff"`
-	Time       int64   `json:"time"`
+	Height     uint32  `json:"height,omitemtpy"`
+	Size       uint32  `json:"size,omitemtpy"`
+	Hash       string  `json:"hash,omitemtpy"`
+	Difficulty float64 `json:"diff,omitemtpy"`
+	StakeDiff  float64 `json:"sdiff,omitemtpy"`
+	Time       int64   `json:"time,omitemtpy"`
+	NumTx      uint32  `json:"txlength,omitempty"`
 	//TicketPoolInfo
-	PoolInfo TicketPoolInfo `json:"ticket_pool"`
+	PoolInfo TicketPoolInfo `json:"ticket_pool,omitempty"`
 }
 
 // BlockExplorerBasic models primary information about block at height Height
@@ -278,37 +299,44 @@ type BlockExplorerBasic struct {
 // BlockExplorerExtraInfo contains supplemental block metadata used by the
 // explorer.
 type BlockExplorerExtraInfo struct {
-	TxLen            int                             `json:"tx"`
-	FormattedTime    string                          `json:"formatted_time"`
-	CoinSupply       int64                           `json:"coin_supply"`
+	TxLen            int                            `json:"tx"`
+	FormattedTime    string                         `json:"formatted_time"`
+	CoinSupply       int64                          `json:"coin_supply"`
 	NextBlockSubsidy *lddljson.GetBlockSubsidyResult `json:"next_block_subsidy"`
+}
+
+// BlockTransactionCounts contains the regular and stake transaction counts for
+// a block.
+type BlockTransactionCounts struct {
+	Tx  int `json:"tx"`
+	STx int `json:"stx"`
 }
 
 // StakeDiff represents data about the evaluated stake difficulty and estimates
 type StakeDiff struct {
 	lddljson.GetStakeDifficultyResult
 	Estimates        lddljson.EstimateStakeDiffResult `json:"estimates"`
-	IdxBlockInWindow int                              `json:"window_block_index"`
-	PriceWindowNum   int                              `json:"window_number"`
+	IdxBlockInWindow int                             `json:"window_block_index"`
+	PriceWindowNum   int                             `json:"window_number"`
 }
 
 // StakeInfoExtended models data about the fee, pool and stake difficulty
 type StakeInfoExtended struct {
 	Feeinfo          lddljson.FeeInfoBlock `json:"feeinfo"`
-	StakeDiff        float64               `json:"stakediff"`
-	PriceWindowNum   int                   `json:"window_number"`
-	IdxBlockInWindow int                   `json:"window_block_index"`
-	PoolInfo         TicketPoolInfo        `json:"ticket_pool"`
+	StakeDiff        float64              `json:"stakediff"`
+	PriceWindowNum   int                  `json:"window_number"`
+	IdxBlockInWindow int                  `json:"window_block_index"`
+	PoolInfo         TicketPoolInfo       `json:"ticket_pool"`
 }
 
 // StakeInfoExtendedEstimates is similar to StakeInfoExtended but includes stake
 // difficulty estimates with the stake difficulty
 type StakeInfoExtendedEstimates struct {
 	Feeinfo          lddljson.FeeInfoBlock `json:"feeinfo"`
-	StakeDiff        StakeDiff             `json:"stakediff"`
-	PriceWindowNum   int                   `json:"window_number"`
-	IdxBlockInWindow int                   `json:"window_block_index"`
-	PoolInfo         TicketPoolInfo        `json:"ticket_pool"`
+	StakeDiff        StakeDiff            `json:"stakediff"`
+	PriceWindowNum   int                  `json:"window_number"`
+	IdxBlockInWindow int                  `json:"window_block_index"`
+	PoolInfo         TicketPoolInfo       `json:"ticket_pool"`
 }
 
 // MempoolTicketFeeInfo models statistical ticket fee info at block height

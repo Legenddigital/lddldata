@@ -19,8 +19,10 @@ const (
 		$11, $12, $13, $14, $15, 
 		$16, $17, $18, $19, $20,
 		$21, $22, $23, $24) `
-	insertBlockRow         = insertBlockRow0 + `RETURNING id;`
-	insertBlockRowChecked  = insertBlockRow0 + `ON CONFLICT (hash) DO NOTHING RETURNING id;`
+	insertBlockRow = insertBlockRow0 + `RETURNING id;`
+	// insertBlockRowChecked  = insertBlockRow0 + `ON CONFLICT (hash) DO NOTHING RETURNING id;`
+	upsertBlockRow = insertBlockRow0 + `ON CONFLICT (hash) DO UPDATE 
+		SET hash = $1 RETURNING id;`
 	insertBlockRowReturnId = `WITH ins AS (` +
 		insertBlockRow0 +
 		`ON CONFLICT (hash) DO UPDATE
@@ -34,6 +36,13 @@ const (
 	LIMIT  1;`
 
 	UpdateLastBlockValid = `UPDATE blocks SET is_valid = $2 WHERE id = $1;`
+
+	SelectBlockByTimeRangeSQL = `SELECT hash, height, size, time, numtx
+		FROM blocks WHERE time BETWEEN $1 and $2 ORDER BY time DESC LIMIT $3;`
+	SelectBlockByTimeRangeSQLNoLimit = `SELECT hash, height, size, time, numtx
+		FROM blocks WHERE time BETWEEN $1 and $2 ORDER BY time DESC;`
+	SelectBlockHashByHeight = `SELECT hash FROM blocks WHERE height = $1;`
+	SelectBlockHeightByHash = `SELECT height FROM blocks WHERE hash = $1;`
 
 	CreateBlockTable = `CREATE TABLE IF NOT EXISTS blocks (  
 		id SERIAL PRIMARY KEY,
@@ -88,6 +97,8 @@ const (
 	VALUES ($1, $2, $3, $4)
 	ON CONFLICT (this_hash) DO NOTHING;`
 
+	SelectBlockChainRowIDByHash = `select block_db_id from block_chain where this_hash = $1;`
+
 	UpdateBlockNext = `UPDATE block_chain set next_hash = $2 WHERE block_db_id = $1;`
 )
 
@@ -103,7 +114,7 @@ func makeBlockInsertStatement(txDbIDs, stxDbIDs []uint64, rtxs, stxs []string, c
 	stxTEXTARRAY := makeARRAYOfTEXT(stxs)
 	var insert string
 	if checked {
-		insert = insertBlockRowChecked
+		insert = upsertBlockRow
 	} else {
 		insert = insertBlockRow
 	}

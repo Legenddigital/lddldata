@@ -1,6 +1,12 @@
-package main
+// Copyright (c) 2017, The lddldata developers
+// See LICENSE for details.
+
+package api
 
 import "fmt"
+
+// APIVersion is an integer value, incremented for breaking changes
+const APIVersion = 1
 
 type version struct {
 	Major, Minor, Patch int
@@ -10,15 +16,15 @@ type version struct {
 
 var ver = version{
 	Major: 1,
-	Minor: 3,
+	Minor: 0,
 	Patch: 0,
-	Label: "beta"}
+	Label: ""}
 
 // CommitHash may be set on the build command line:
 // go build -ldflags "-X main.CommitHash=`git rev-parse --short HEAD`"
 var CommitHash string
 
-const appName string = "lddldata"
+const appName string = "lddldata-api"
 
 func (v *version) String() string {
 	var hashStr string

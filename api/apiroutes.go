@@ -1,21 +1,33 @@
-package main
+// Copyright (c) 2018, The Legenddigital developers
+// Copyright (c) 2017, The lddldata developers
+// See LICENSE for details.
+
+package api
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"sort"
 	"strconv"
 	"sync"
 
 	"github.com/Legenddigital/lddld/lddljson"
 	"github.com/Legenddigital/lddld/rpcclient"
-	apitypes "github.com/Legenddigital/lddldata/lddldataapi"
+	apitypes "github.com/Legenddigital/lddldata/api/types"
+	"github.com/Legenddigital/lddldata/db/dbtypes"
+	"github.com/Legenddigital/lddldata/explorer"
+	m "github.com/Legenddigital/lddldata/middleware"
+	notify "github.com/Legenddigital/lddldata/notification"
+	appver "github.com/Legenddigital/lddldata/version"
 )
 
-// APIDataSource implements an interface for collecting data for the api
-type APIDataSource interface {
+// DataSourceLite specifies an interface for collecting data from the built-in
+// databases (i.e. SQLite, badger, ffldb)
+type DataSourceLite interface {
+	CoinSupply() *apitypes.CoinSupply
 	GetHeight() int
 	GetBestBlockHash() (string, error)
 	GetBlockHash(idx int64) (string, error)
@@ -60,41 +72,69 @@ type APIDataSource interface {
 	GetMempoolSSTxDetails(N int) *apitypes.MempoolTicketDetails
 	GetAddressTransactions(addr string, count int) *apitypes.Address
 	GetAddressTransactionsRaw(addr string, count int) []*apitypes.AddressTxRaw
+	GetAddressTransactionsWithSkip(addr string, count, skip int) *apitypes.Address
+	GetAddressTransactionsRawWithSkip(addr string, count, skip int) []*apitypes.AddressTxRaw
+	SendRawTransaction(txhex string) (string, error)
+	GetExplorerAddress(address string, count, offset int64) *explorer.AddressInfo
+}
+
+// DataSourceAux specifies an interface for advanced data collection using the
+// auxiliary DB (e.g. PostgreSQL).
+type DataSourceAux interface {
+	SpendingTransaction(fundingTx string, vout uint32) (string, uint32, int8, error)
+	SpendingTransactions(fundingTxID string) ([]string, []uint32, []uint32, error)
+	AddressHistory(address string, N, offset int64, txnType dbtypes.AddrTxnType) ([]*dbtypes.AddressRow, *explorer.AddressBalance, error)
+	FillAddressTransactions(addrInfo *explorer.AddressInfo) error
+	AddressTransactionDetails(addr string, count, skip int64,
+		txnType dbtypes.AddrTxnType) (*apitypes.Address, error)
+	AddressTotals(address string) (*apitypes.AddressTotals, error)
 }
 
 // lddldata application context used by all route handlers
 type appContext struct {
-	nodeClient *rpcclient.Client
-	BlockData  APIDataSource
-	Status     apitypes.Status
-	statusMtx  sync.RWMutex
-	JSONIndent string
+	nodeClient    *rpcclient.Client
+	BlockData     DataSourceLite
+	AuxDataSource DataSourceAux
+	LiteMode      bool
+	Status        apitypes.Status
+	statusMtx     sync.RWMutex
+	JSONIndent    string
 }
 
-// Constructor for appContext
-func newContext(client *rpcclient.Client, blockData APIDataSource, JSONIndent string) *appContext {
+// NewContext constructs a new appContext from the RPC client, primary and
+// auxiliary data sources, and JSON indentation string.
+func NewContext(client *rpcclient.Client, dataSource DataSourceLite, auxDataSource DataSourceAux, JSONIndent string) *appContext {
 	conns, _ := client.GetConnectionCount()
 	nodeHeight, _ := client.GetBlockCount()
+
+	// explorerDataSource is an interface that could have a value of pointer
+	// type, and if either is nil this means lite mode.
+	liteMode := auxDataSource == nil || reflect.ValueOf(auxDataSource).IsNil()
+
 	return &appContext{
-		nodeClient: client,
-		BlockData:  blockData,
+		nodeClient:    client,
+		BlockData:     dataSource,
+		AuxDataSource: auxDataSource,
+		LiteMode:      liteMode,
 		Status: apitypes.Status{
 			Height:          uint32(nodeHeight),
 			NodeConnections: conns,
 			APIVersion:      APIVersion,
-			LddldataVersion: ver.String(),
+			LddldataVersion:  appver.Ver.String(),
 		},
 		JSONIndent: JSONIndent,
 	}
 }
 
+// StatusNtfnHandler keeps the appContext's Status up-to-date with changes in
+// node and DB status.
 func (c *appContext) StatusNtfnHandler(wg *sync.WaitGroup, quit chan struct{}) {
 	defer wg.Done()
 out:
 	for {
 	keepon:
 		select {
-		case height, ok := <-ntfnChans.updateStatusNodeHeight:
+		case height, ok := <-notify.NtfnChans.UpdateStatusNodeHeight:
 			if !ok {
 				log.Warnf("Block connected channel closed.")
 				break out
@@ -102,6 +142,9 @@ out:
 
 			c.statusMtx.Lock()
 			c.Status.Height = height
+
+			// if DB height agrees with node height, then we're ready
+			c.Status.Ready = c.Status.Height == c.Status.DBHeight
 
 			var err error
 			c.Status.NodeConnections, err = c.nodeClient.GetConnectionCount()
@@ -113,14 +156,14 @@ out:
 			}
 			c.statusMtx.Unlock()
 
-		case height, ok := <-ntfnChans.updateStatusDBHeight:
+		case height, ok := <-notify.NtfnChans.UpdateStatusDBHeight:
 			if !ok {
 				log.Warnf("Block connected channel closed.")
 				break out
 			}
 
 			if c.BlockData == nil {
-				panic("BlockData APIDataSource is nil")
+				panic("BlockData DataSourceLite is nil")
 			}
 
 			summary := c.BlockData.GetBestBlockSummary()
@@ -129,17 +172,15 @@ out:
 				break keepon
 			}
 
-			bdHeight := c.BlockData.GetHeight()
 			c.statusMtx.Lock()
+			c.Status.DBHeight = height
+			c.Status.DBLastBlockTime = summary.Time
+
+			bdHeight := c.BlockData.GetHeight()
 			if bdHeight >= 0 && summary.Height == uint32(bdHeight) &&
 				height == uint32(bdHeight) {
-				c.Status.DBHeight = height
 				// if DB height agrees with node height, then we're ready
-				if c.Status.Height == height {
-					c.Status.Ready = true
-				} else {
-					c.Status.Ready = false
-				}
+				c.Status.Ready = c.Status.Height == c.Status.DBHeight
 				c.statusMtx.Unlock()
 				break keepon
 			}
@@ -162,121 +203,6 @@ out:
 // provides a heartbeat, and no information about the application status.
 func (c *appContext) root(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprint(w, "lddldata api running")
-}
-
-func getBlockStepCtx(r *http.Request) int {
-	step, ok := r.Context().Value(ctxBlockStep).(int)
-	if !ok {
-		apiLog.Error("block step not set")
-		return -1
-	}
-	return step
-}
-
-func getBlockIndexCtx(r *http.Request) int {
-	idx, ok := r.Context().Value(ctxBlockIndex).(int)
-	if !ok {
-		apiLog.Error("block index not set")
-		return -1
-	}
-	return idx
-}
-
-func getBlockIndex0Ctx(r *http.Request) int {
-	idx, ok := r.Context().Value(ctxBlockIndex0).(int)
-	if !ok {
-		apiLog.Error("block index0 not set")
-		return -1
-	}
-	return idx
-}
-
-func getBlockHashOnlyCtx(r *http.Request) string {
-	hash, ok := r.Context().Value(ctxBlockHash).(string)
-	if !ok {
-		apiLog.Trace("block hash not set")
-		return ""
-	}
-	return hash
-}
-
-func (c *appContext) getBlockHashCtx(r *http.Request) string {
-	hash := getBlockHashOnlyCtx(r)
-	if hash == "" {
-		var err error
-		hash, err = c.BlockData.GetBlockHash(int64(getBlockIndexCtx(r)))
-		if err != nil {
-			apiLog.Errorf("Unable to GetBlockHash: %v", err)
-		}
-	}
-	return hash
-}
-
-func (c *appContext) getBlockHeightCtx(r *http.Request) int64 {
-	idxI, ok := r.Context().Value(ctxBlockIndex).(int)
-	idx := int64(idxI)
-	if !ok || idx < 0 {
-		var err error
-		idx, err = c.BlockData.GetBlockHeight(getBlockHashOnlyCtx(r))
-		if err != nil {
-			apiLog.Errorf("Unable to GetBlockHeight: %v", err)
-		}
-	}
-	return idx
-}
-
-func getTxIDCtx(r *http.Request) string {
-	hash, ok := r.Context().Value(ctxTxHash).(string)
-	if !ok {
-		apiLog.Trace("txid not set")
-		return ""
-	}
-	return hash
-}
-
-func getTxIOIndexCtx(r *http.Request) int {
-	index, ok := r.Context().Value(ctxTxInOutIndex).(int)
-	if !ok {
-		apiLog.Trace("txinoutindex not set")
-		return -1
-	}
-	return index
-}
-
-func getAddressCtx(r *http.Request) string {
-	address, ok := r.Context().Value(ctxAddress).(string)
-	if !ok {
-		apiLog.Trace("address not set")
-		return ""
-	}
-	return address
-}
-
-func getNCtx(r *http.Request) int {
-	N, ok := r.Context().Value(ctxN).(int)
-	if !ok {
-		apiLog.Trace("N not set")
-		return -1
-	}
-	return N
-}
-
-func getStatusCtx(r *http.Request) *apitypes.Status {
-	status, ok := r.Context().Value(ctxAPIStatus).(*apitypes.Status)
-	if !ok {
-		apiLog.Error("apitypes.Status not set")
-		return nil
-	}
-	return status
-}
-
-func getLatestVoteVersionCtx(r *http.Request) int {
-	ver, ok := r.Context().Value(ctxStakeVersionLatest).(int)
-	if !ok {
-		apiLog.Error("latest stake version not set")
-		return -1
-	}
-	return ver
 }
 
 func (c *appContext) writeJSONHandlerFunc(thing interface{}) http.HandlerFunc {
@@ -303,7 +229,7 @@ func (c *appContext) getIndentQuery(r *http.Request) (indent string) {
 }
 
 func getVoteVersionQuery(r *http.Request) (int32, string, error) {
-	verLatest := int64(getLatestVoteVersionCtx(r))
+	verLatest := int64(m.GetLatestVoteVersionCtx(r))
 	voteVersion := r.URL.Query().Get("version")
 	if voteVersion == "" {
 		return int32(verLatest), voteVersion, nil
@@ -324,6 +250,17 @@ func (c *appContext) status(w http.ResponseWriter, r *http.Request) {
 	c.statusMtx.RLock()
 	defer c.statusMtx.RUnlock()
 	writeJSON(w, c.Status, c.getIndentQuery(r))
+}
+
+func (c *appContext) coinSupply(w http.ResponseWriter, r *http.Request) {
+	supply := c.BlockData.CoinSupply()
+	if supply == nil {
+		apiLog.Error("Unable to get coin supply.")
+		http.Error(w, http.StatusText(422), 422)
+		return
+	}
+
+	writeJSON(w, supply, c.getIndentQuery(r))
 }
 
 func (c *appContext) currentHeight(w http.ResponseWriter, r *http.Request) {
@@ -409,10 +346,12 @@ func (c *appContext) getBlockTransactionsCount(w http.ResponseWriter, r *http.Re
 		apiLog.Errorf("Unable to get block %s transactions", hash)
 		return
 	}
-	writeJSON(w, &struct {
-		Tx  int `json:"tx"`
-		STx int `json:"stx"`
-	}{len(blockTransactions.Tx), len(blockTransactions.STx)}, c.getIndentQuery(r))
+
+	counts := &apitypes.BlockTransactionCounts{
+		Tx:  len(blockTransactions.Tx),
+		STx: len(blockTransactions.STx),
+	}
+	writeJSON(w, counts, c.getIndentQuery(r))
 }
 
 func (c *appContext) getBlockHeader(w http.ResponseWriter, r *http.Request) {
@@ -466,7 +405,7 @@ func (c *appContext) getVoteInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *appContext) getTransaction(w http.ResponseWriter, r *http.Request) {
-	txid := getTxIDCtx(r)
+	txid := m.GetTxIDCtx(r)
 	if txid == "" {
 		http.Error(w, http.StatusText(422), 422)
 		return
@@ -483,7 +422,7 @@ func (c *appContext) getTransaction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *appContext) getTransactionHex(w http.ResponseWriter, r *http.Request) {
-	txid := getTxIDCtx(r)
+	txid := m.GetTxIDCtx(r)
 	if txid == "" {
 		http.Error(w, http.StatusText(422), 422)
 		return
@@ -495,7 +434,7 @@ func (c *appContext) getTransactionHex(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *appContext) getDecodedTx(w http.ResponseWriter, r *http.Request) {
-	txid := getTxIDCtx(r)
+	txid := m.GetTxIDCtx(r)
 	if txid == "" {
 		http.Error(w, http.StatusText(422), 422)
 		return
@@ -511,8 +450,50 @@ func (c *appContext) getDecodedTx(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, tx, c.getIndentQuery(r))
 }
 
+func (c *appContext) getTransactions(w http.ResponseWriter, r *http.Request) {
+	txids := m.GetTxnsCtx(r)
+	if txids == nil {
+		http.Error(w, http.StatusText(422), 422)
+		return
+	}
+
+	txns := make([]*apitypes.Tx, 0, len(txids))
+	for i := range txids {
+		tx := c.BlockData.GetRawTransaction(txids[i])
+		if tx == nil {
+			apiLog.Errorf("Unable to get transaction %s", txids[i])
+			http.Error(w, http.StatusText(422), 422)
+			return
+		}
+		txns = append(txns, tx)
+	}
+
+	writeJSON(w, txns, c.getIndentQuery(r))
+}
+
+func (c *appContext) getDecodedTransactions(w http.ResponseWriter, r *http.Request) {
+	txids := m.GetTxnsCtx(r)
+	if txids == nil {
+		http.Error(w, http.StatusText(422), 422)
+		return
+	}
+
+	txns := make([]*apitypes.TrimmedTx, 0, len(txids))
+	for i := range txids {
+		tx := c.BlockData.GetTrimmedTransaction(txids[i])
+		if tx == nil {
+			apiLog.Errorf("Unable to get transaction %s", tx)
+			http.Error(w, http.StatusText(422), 422)
+			return
+		}
+		txns = append(txns, tx)
+	}
+
+	writeJSON(w, txns, c.getIndentQuery(r))
+}
+
 func (c *appContext) getTxVoteInfo(w http.ResponseWriter, r *http.Request) {
-	txid := getTxIDCtx(r)
+	txid := m.GetTxIDCtx(r)
 	if txid == "" {
 		http.Error(w, http.StatusText(422), 422)
 		return
@@ -528,7 +509,7 @@ func (c *appContext) getTxVoteInfo(w http.ResponseWriter, r *http.Request) {
 
 // getTransactionInputs serves []TxIn
 func (c *appContext) getTransactionInputs(w http.ResponseWriter, r *http.Request) {
-	txid := getTxIDCtx(r)
+	txid := m.GetTxIDCtx(r)
 	if txid == "" {
 		http.Error(w, http.StatusText(422), 422)
 		return
@@ -547,13 +528,13 @@ func (c *appContext) getTransactionInputs(w http.ResponseWriter, r *http.Request
 
 // getTransactionInput serves TxIn[i]
 func (c *appContext) getTransactionInput(w http.ResponseWriter, r *http.Request) {
-	txid := getTxIDCtx(r)
+	txid := m.GetTxIDCtx(r)
 	if txid == "" {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
 
-	index := getTxIOIndexCtx(r)
+	index := m.GetTxIOIndexCtx(r)
 	if index < 0 {
 		http.NotFound(w, r)
 		//http.Error(w, http.StatusText(422), 422)
@@ -579,7 +560,7 @@ func (c *appContext) getTransactionInput(w http.ResponseWriter, r *http.Request)
 
 // getTransactionOutputs serves []TxOut
 func (c *appContext) getTransactionOutputs(w http.ResponseWriter, r *http.Request) {
-	txid := getTxIDCtx(r)
+	txid := m.GetTxIDCtx(r)
 	if txid == "" {
 		http.Error(w, http.StatusText(422), 422)
 		return
@@ -598,13 +579,13 @@ func (c *appContext) getTransactionOutputs(w http.ResponseWriter, r *http.Reques
 
 // getTransactionOutput serves TxOut[i]
 func (c *appContext) getTransactionOutput(w http.ResponseWriter, r *http.Request) {
-	txid := getTxIDCtx(r)
+	txid := m.GetTxIDCtx(r)
 	if txid == "" {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
 
-	index := getTxIOIndexCtx(r)
+	index := m.GetTxIOIndexCtx(r)
 	if index < 0 {
 		http.NotFound(w, r)
 		return
@@ -711,7 +692,7 @@ func (c *appContext) getSSTxSummary(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *appContext) getSSTxFees(w http.ResponseWriter, r *http.Request) {
-	N := getNCtx(r)
+	N := m.GetNCtx(r)
 	sstxFees := c.BlockData.GetMempoolSSTxFeeRates(N)
 	if sstxFees == nil {
 		apiLog.Errorf("Unable to get SSTx fees from mempool")
@@ -723,7 +704,7 @@ func (c *appContext) getSSTxFees(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *appContext) getSSTxDetails(w http.ResponseWriter, r *http.Request) {
-	N := getNCtx(r)
+	N := m.GetNCtx(r)
 	sstxDetails := c.BlockData.GetMempoolSSTxDetails(N)
 	if sstxDetails == nil {
 		apiLog.Errorf("Unable to get SSTx details from mempool")
@@ -751,13 +732,13 @@ func (c *appContext) getBlockSize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *appContext) getBlockRangeSize(w http.ResponseWriter, r *http.Request) {
-	idx0 := getBlockIndex0Ctx(r)
+	idx0 := m.GetBlockIndex0Ctx(r)
 	if idx0 < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
 
-	idx := getBlockIndexCtx(r)
+	idx := m.GetBlockIndexCtx(r)
 	if idx < 0 || idx < idx0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
@@ -773,19 +754,19 @@ func (c *appContext) getBlockRangeSize(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *appContext) getBlockRangeSteppedSize(w http.ResponseWriter, r *http.Request) {
-	idx0 := getBlockIndex0Ctx(r)
+	idx0 := m.GetBlockIndex0Ctx(r)
 	if idx0 < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
 
-	idx := getBlockIndexCtx(r)
+	idx := m.GetBlockIndexCtx(r)
 	if idx < 0 || idx < idx0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
 
-	step := getBlockStepCtx(r)
+	step := m.GetBlockStepCtx(r)
 	if step <= 0 {
 		http.Error(w, "Yeaaah, that step's not gonna work with me.", 422)
 		return
@@ -813,13 +794,13 @@ func (c *appContext) getBlockRangeSteppedSize(w http.ResponseWriter, r *http.Req
 }
 
 func (c *appContext) getBlockRangeSummary(w http.ResponseWriter, r *http.Request) {
-	idx0 := getBlockIndex0Ctx(r)
+	idx0 := m.GetBlockIndex0Ctx(r)
 	if idx0 < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
 
-	idx := getBlockIndexCtx(r)
+	idx := m.GetBlockIndexCtx(r)
 	if idx < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
@@ -865,19 +846,19 @@ func (c *appContext) getBlockRangeSummary(w http.ResponseWriter, r *http.Request
 }
 
 func (c *appContext) getBlockRangeSteppedSummary(w http.ResponseWriter, r *http.Request) {
-	idx0 := getBlockIndex0Ctx(r)
+	idx0 := m.GetBlockIndex0Ctx(r)
 	if idx0 < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
 
-	idx := getBlockIndexCtx(r)
+	idx := m.GetBlockIndexCtx(r)
 	if idx < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
 
-	step := getBlockStepCtx(r)
+	step := m.GetBlockStepCtx(r)
 	if step <= 0 {
 		http.Error(w, "Yeaaah, that step's not gonna work with me.", 422)
 		return
@@ -961,13 +942,13 @@ func (c *appContext) getTicketPoolInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *appContext) getTicketPoolInfoRange(w http.ResponseWriter, r *http.Request) {
-	idx0 := getBlockIndex0Ctx(r)
+	idx0 := m.GetBlockIndex0Ctx(r)
 	if idx0 < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
 
-	idx := getBlockIndexCtx(r)
+	idx := m.GetBlockIndexCtx(r)
 	if idx < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
@@ -988,13 +969,13 @@ func (c *appContext) getTicketPoolInfoRange(w http.ResponseWriter, r *http.Reque
 }
 
 func (c *appContext) getTicketPoolValAndSizeRange(w http.ResponseWriter, r *http.Request) {
-	idx0 := getBlockIndex0Ctx(r)
+	idx0 := m.GetBlockIndex0Ctx(r)
 	if idx0 < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
 
-	idx := getBlockIndexCtx(r)
+	idx := m.GetBlockIndexCtx(r)
 	if idx < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
@@ -1027,13 +1008,13 @@ func (c *appContext) getStakeDiff(w http.ResponseWriter, r *http.Request) {
 }
 
 func (c *appContext) getStakeDiffRange(w http.ResponseWriter, r *http.Request) {
-	idx0 := getBlockIndex0Ctx(r)
+	idx0 := m.GetBlockIndex0Ctx(r)
 	if idx0 < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
 
-	idx := getBlockIndexCtx(r)
+	idx := m.GetBlockIndexCtx(r)
 	if idx < 0 {
 		http.Error(w, http.StatusText(422), 422)
 		return
@@ -1043,20 +1024,58 @@ func (c *appContext) getStakeDiffRange(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, sdiffs, c.getIndentQuery(r))
 }
 
-func (c *appContext) getAddressTransactions(w http.ResponseWriter, r *http.Request) {
-	address := getAddressCtx(r)
-	count := getNCtx(r)
+func (c *appContext) addressTotals(w http.ResponseWriter, r *http.Request) {
+	address := m.GetAddressCtx(r)
 	if address == "" {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
+
+	if c.LiteMode {
+		// not available in lite mode
+		http.Error(w, http.StatusText(422), 422)
+		return
+	}
+
+	totals, err := c.AuxDataSource.AddressTotals(address)
+	if err != nil {
+		log.Warnf("failed to get address totals (%s): %v", address, err)
+		http.Error(w, http.StatusText(422), 422)
+		return
+	}
+
+	writeJSON(w, totals, c.getIndentQuery(r))
+}
+
+func (c *appContext) getAddressTransactions(w http.ResponseWriter, r *http.Request) {
+	address := m.GetAddressCtx(r)
+	if address == "" {
+		http.Error(w, http.StatusText(422), 422)
+		return
+	}
+
+	count := int64(m.GetNCtx(r))
+	skip := int64(m.GetMCtx(r))
 	if count <= 0 {
 		count = 10
-	} else if count > 2000 {
+	} else if c.LiteMode && count > 2000 {
 		count = 2000
+	} else if count > 8000 {
+		count = 8000
 	}
-	txs := c.BlockData.GetAddressTransactions(address, count)
-	if txs == nil {
+	if skip <= 0 {
+		skip = 0
+	}
+
+	var err error
+	var txs *apitypes.Address
+	if c.LiteMode {
+		txs = c.BlockData.GetAddressTransactionsWithSkip(address, int(count), int(skip))
+	} else {
+		txs, err = c.AuxDataSource.AddressTransactionDetails(address, count, skip, dbtypes.AddrTxnAll)
+	}
+
+	if txs == nil || err != nil {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
@@ -1064,21 +1083,74 @@ func (c *appContext) getAddressTransactions(w http.ResponseWriter, r *http.Reque
 }
 
 func (c *appContext) getAddressTransactionsRaw(w http.ResponseWriter, r *http.Request) {
-	address := getAddressCtx(r)
-	count := getNCtx(r)
+	address := m.GetAddressCtx(r)
 	if address == "" {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
+
+	count := int64(m.GetNCtx(r))
+	skip := int64(m.GetMCtx(r))
 	if count <= 0 {
 		count = 10
-	} else if count > 2000 {
+	} else if c.LiteMode && count > 2000 {
 		count = 2000
+	} else if count > 8000 {
+		count = 8000
 	}
-	txs := c.BlockData.GetAddressTransactionsRaw(address, count)
+	if skip <= 0 {
+		skip = 0
+	}
+
+	//var txs []*apitypes.AddressTxRaw
+	// TODO: add postgresql powered method
+	//if c.LiteMode {
+	txs := c.BlockData.GetAddressTransactionsRawWithSkip(address, int(count), int(skip))
+	// } else {
+	// 	txs, err = c.AuxDataSource.AddressTransactionRawDetails(address, count, skip, dbtypes.AddrTxnAll)
+	// }
 	if txs == nil {
 		http.Error(w, http.StatusText(422), 422)
 		return
 	}
+
 	writeJSON(w, txs, c.getIndentQuery(r))
+}
+
+func (c *appContext) StakeVersionLatestCtx(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := m.StakeVersionLatestCtx(r, c.BlockData.GetStakeVersionsLatest)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (c *appContext) BlockHashPathAndIndexCtx(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := m.BlockHashPathAndIndexCtx(r, c.BlockData)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (c *appContext) BlockIndexLatestCtx(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := m.BlockIndexLatestCtx(r, c.BlockData)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (c *appContext) getBlockHeightCtx(r *http.Request) int64 {
+	idx := m.GetBlockHeightCtx(r, c.BlockData)
+	return idx
+}
+
+func (c *appContext) getBlockHashCtx(r *http.Request) string {
+	hash := m.GetBlockHashCtx(r)
+	if hash == "" {
+		var err error
+		hash, err = c.BlockData.GetBlockHash(int64(m.GetBlockIndexCtx(r)))
+		if err != nil {
+			apiLog.Errorf("Unable to GetBlockHash: %v", err)
+		}
+	}
+	return hash
 }

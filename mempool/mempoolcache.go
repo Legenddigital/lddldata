@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/Legenddigital/lddld/lddljson"
-	apitypes "github.com/Legenddigital/lddldata/lddldataapi"
+	apitypes "github.com/Legenddigital/lddldata/api/types"
 )
 
 // MempoolDataCache models the basic data for the mempool cache

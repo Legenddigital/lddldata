@@ -1,4 +1,3 @@
-// Copyright (c) 2018, The Decred developers
 // Copyright (c) 2018, The Legenddigital developers
 // Copyright (c) 2017, The lddldata developers
 // See LICENSE for details.

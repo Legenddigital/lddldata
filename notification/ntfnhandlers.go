@@ -1,7 +1,8 @@
+// Copyright (c) 2018, The Legenddigital developers
 // Copyright (c) 2017, Jonathan Chappelow
 // See LICENSE for details.
 
-package main
+package notification
 
 import (
 	"strings"
@@ -9,17 +10,22 @@ import (
 	"time"
 
 	"github.com/Legenddigital/lddld/chaincfg/chainhash"
+	"github.com/Legenddigital/lddld/lddljson"
 	"github.com/Legenddigital/lddld/lddlutil"
 	"github.com/Legenddigital/lddld/rpcclient"
 	"github.com/Legenddigital/lddld/wire"
+	"github.com/Legenddigital/lddldata/api/insight"
 	"github.com/Legenddigital/lddldata/blockdata"
 	"github.com/Legenddigital/lddldata/db/lddlsqlite"
+	"github.com/Legenddigital/lddldata/explorer"
 	"github.com/Legenddigital/lddldata/mempool"
 	"github.com/Legenddigital/lddldata/stakedb"
 	"github.com/Legenddigital/lddlwallet/wallet/udb"
 )
 
-func registerNodeNtfnHandlers(lddldClient *rpcclient.Client) *ContextualError {
+// RegisterNodeNtfnHandlers registers with lddld to receive new block,
+// transaction and winning ticket notifications.
+func RegisterNodeNtfnHandlers(lddldClient *rpcclient.Client) *ContextualError {
 	var err error
 	// Register for block connection and chain reorg notifications.
 	if err = lddldClient.NotifyBlocks(); err != nil {
@@ -27,16 +33,9 @@ func registerNodeNtfnHandlers(lddldClient *rpcclient.Client) *ContextualError {
 			"registration failed", err)
 	}
 
-	// Register for stake difficulty change notifications.
-	// if err = lddldClient.NotifyStakeDifficulty(); err != nil {
-	// 	return newContextualError("stake difficulty change "+
-	// 		"notification registration failed", err)
-	// }
-
 	// Register for tx accepted into mempool ntfns
-	if err = lddldClient.NotifyNewTransactions(false); err != nil {
-		return newContextualError("new transaction "+
-			"notification registration failed", err)
+	if err = lddldClient.NotifyNewTransactions(true); err != nil {
+		return newContextualError("new transaction verbose notification registration failed", err)
 	}
 
 	// For OnNewTickets
@@ -83,6 +82,8 @@ func (q *collectionQueue) SetSynchronousHandlers(syncHandlers []func(hash *chain
 	q.syncHandlers = syncHandlers
 }
 
+// ProcessBlocks receives new *blockHashHeights, calls the synchronous handlers,
+// then signals to the monitors that a new block was mined.
 func (q *collectionQueue) ProcessBlocks() {
 	// process queued blocks one at a time
 	for bh := range q.q {
@@ -98,18 +99,25 @@ func (q *collectionQueue) ProcessBlocks() {
 
 		log.Debugf("Synchronous handlers of collectionQueue.ProcessBlocks() completed in %v", time.Since(start))
 
-		// Signal to mempool monitor that a block was mined
+		// Signal to mempool monitors that a block was mined
 		select {
-		case ntfnChans.newTxChan <- &mempool.NewTx{
+		case NtfnChans.NewTxChan <- &mempool.NewTx{
 			Hash: nil,
 			T:    time.Now(),
 		}:
 		default:
 		}
 
+		select {
+		case NtfnChans.ExpNewTxChan <- &explorer.NewMempoolTx{
+			Hex: "",
+		}:
+		default:
+		}
+
 		// API status update handler
 		select {
-		case ntfnChans.updateStatusNodeHeight <- uint32(height):
+		case NtfnChans.UpdateStatusNodeHeight <- uint32(height):
 		default:
 		}
 	}
@@ -128,8 +136,8 @@ func (q *collectionQueue) ProcessBlocks() {
 // 	return b
 // }
 
-// Define notification handlers
-func makeNodeNtfnHandlers(cfg *config) (*rpcclient.NotificationHandlers, *collectionQueue) {
+// MakeNodeNtfnHandlers defines the lddld notification handlers
+func MakeNodeNtfnHandlers() (*rpcclient.NotificationHandlers, *collectionQueue) {
 	blockQueue := NewCollectionQueue()
 	go blockQueue.ProcessBlocks()
 	return &rpcclient.NotificationHandlers{
@@ -150,53 +158,58 @@ func makeNodeNtfnHandlers(cfg *config) (*rpcclient.NotificationHandlers, *collec
 		},
 		OnReorganization: func(oldHash *chainhash.Hash, oldHeight int32,
 			newHash *chainhash.Hash, newHeight int32) {
+			wg := new(sync.WaitGroup)
 			// Send reorg data to lddlsqlite's monitor
+			wg.Add(1)
 			select {
-			case ntfnChans.reorgChanWiredDB <- &lddlsqlite.ReorgData{
+			case NtfnChans.ReorgChanWiredDB <- &lddlsqlite.ReorgData{
 				OldChainHead:   *oldHash,
 				OldChainHeight: oldHeight,
 				NewChainHead:   *newHash,
 				NewChainHeight: newHeight,
+				WG:             wg,
 			}:
 			default:
+				wg.Done()
 			}
+
 			// Send reorg data to blockdata's monitor (so that it stops collecting)
+			wg.Add(1)
 			select {
-			case ntfnChans.reorgChanBlockData <- &blockdata.ReorgData{
+			case NtfnChans.ReorgChanBlockData <- &blockdata.ReorgData{
 				OldChainHead:   *oldHash,
 				OldChainHeight: oldHeight,
 				NewChainHead:   *newHash,
 				NewChainHeight: newHeight,
+				WG:             wg,
 			}:
 			default:
+				wg.Done()
 			}
+
 			// Send reorg data to stakedb's monitor
+			wg.Add(1)
 			select {
-			case ntfnChans.reorgChanStakeDB <- &stakedb.ReorgData{
+			case NtfnChans.ReorgChanStakeDB <- &stakedb.ReorgData{
 				OldChainHead:   *oldHash,
 				OldChainHeight: oldHeight,
 				NewChainHead:   *newHash,
 				NewChainHeight: newHeight,
+				WG:             wg,
 			}:
 			default:
+				wg.Done()
 			}
+			wg.Wait()
 		},
-		// Not too useful since this notifies on every block
-		// OnStakeDifficulty: func(hash *chainhash.Hash, height int64,
-		// 	stakeDiff int64) {
-		// 	select {
-		// 	case ntfnChans.stakeDiffChan <- stakeDiff:
-		// 	default:
-		// 	}
-		// },
-		// TODO
+
 		OnWinningTickets: func(blockHash *chainhash.Hash, blockHeight int64,
 			tickets []*chainhash.Hash) {
 			var txstr []string
 			for _, t := range tickets {
 				txstr = append(txstr, t.String())
 			}
-			log.Debugf("Winning tickets: %v", strings.Join(txstr, ", "))
+			log.Tracef("Winning tickets: %v", strings.Join(txstr, ", "))
 		},
 		// maturing tickets. Thanks for fixing the tickets type bug, jolan!
 		OnNewTickets: func(hash *chainhash.Hash, height int64, stakeDiff int64,
@@ -215,32 +228,47 @@ func makeNodeNtfnHandlers(cfg *config) (*rpcclient.NotificationHandlers, *collec
 			tx := lddlutil.NewTx(&rec.MsgTx)
 			txHash := rec.Hash
 			select {
-			case ntfnChans.relevantTxMempoolChan <- tx:
+			case NtfnChans.RelevantTxMempoolChan <- tx:
 				log.Debugf("Detected transaction %v in mempool containing registered address.",
 					txHash.String())
 			default:
 			}
 		},
-		// OnTxAccepted is invoked when a transaction is accepted into the
-		// memory pool.  It will only be invoked if a preceding call to
-		// NotifyNewTransactions with the verbose flag set to false has been
-		// made to register for the notification and the function is non-nil.
-		OnTxAccepted: func(hash *chainhash.Hash, amount lddlutil.Amount) {
-			// Just send the tx hash and let the goroutine handle everything.
+
+		// OnTxAcceptedVerbose is invoked same as OnTxAccepted but is used here
+		// for the mempool monitors to avoid an extra call to lddld for
+		// the tx details
+		OnTxAcceptedVerbose: func(txDetails *lddljson.TxRawResult) {
+
 			select {
-			case ntfnChans.newTxChan <- &mempool.NewTx{
+			case NtfnChans.ExpNewTxChan <- &explorer.NewMempoolTx{
+				Time: time.Now().Unix(),
+				Hex:  txDetails.Hex,
+			}:
+			default:
+				log.Warn("expNewTxChan buffer full!")
+			}
+
+			select {
+			case NtfnChans.InsightNewTxChan <- &insight.NewTx{
+				Hex:   txDetails.Hex,
+				Vouts: txDetails.Vout,
+			}:
+			default:
+				if NtfnChans.InsightNewTxChan != nil {
+					log.Warn("InsightNewTxChan buffer full!")
+				}
+			}
+
+			hash, _ := chainhash.NewHashFromStr(txDetails.Txid)
+			select {
+			case NtfnChans.NewTxChan <- &mempool.NewTx{
 				Hash: hash,
 				T:    time.Now(),
 			}:
 			default:
-				log.Warn("newTxChan buffer full!")
+				log.Warn("NewTxChan buffer full!")
 			}
-			//log.Trace("Transaction accepted to mempool: ", hash, amount)
 		},
-		// Note: lddljson.TxRawResult is from getrawtransaction
-		//OnTxAcceptedVerbose: func(txDetails *lddljson.TxRawResult) {
-		//txDetails.Hex
-		//log.Info("Transaction accepted to mempool: ", txDetails.Txid)
-		//},
 	}, blockQueue
 }

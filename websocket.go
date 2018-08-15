@@ -6,7 +6,7 @@ package main
 import (
 	"sync"
 
-	apitypes "github.com/Legenddigital/lddldata/lddldataapi"
+	apitypes "github.com/Legenddigital/lddldata/api/types"
 )
 
 // WebSocketMessage represents the JSON object used to send and received typed

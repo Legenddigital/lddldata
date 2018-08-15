@@ -20,7 +20,7 @@ import (
 	"github.com/Legenddigital/lddld/lddljson"
 	"github.com/Legenddigital/lddld/lddlutil"
 	"github.com/Legenddigital/lddld/rpcclient"
-	apitypes "github.com/Legenddigital/lddldata/lddldataapi"
+	apitypes "github.com/Legenddigital/lddldata/api/types"
 )
 
 // NewTx models data for a new transaction
@@ -154,8 +154,8 @@ func (p *mempoolMonitor) TxHandler(client *rpcclient.Client) {
 				// txHeight = tx.MsgTx().TxIn[0].BlockHeight // uh, no
 			case stake.TxTypeSSGen:
 				// Vote
-				voteHash := &tx.MsgTx().TxIn[1].PreviousOutPoint.Hash
-				log.Tracef("Received vote %v for ticket %v", tx.Hash(), voteHash)
+				ticketHash := &tx.MsgTx().TxIn[1].PreviousOutPoint.Hash
+				log.Tracef("Received vote %v for ticket %v", tx.Hash(), ticketHash)
 				// TODO: Show subsidy for this vote (Vout[2] - Vin[1] ?)
 				continue
 			case stake.TxTypeSSRtx:
@@ -299,11 +299,6 @@ func (m *MempoolData) GetHeight() uint32 {
 // GetNumTickets returns number of tickets
 func (m *MempoolData) GetNumTickets() uint32 {
 	return m.NumTickets
-}
-
-// GetNumTickets returns the number of votes
-func (m *MempoolData) GetNumVotes() uint32 {
-	return m.NumVotes
 }
 
 type mempoolDataCollector struct {

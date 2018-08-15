@@ -1,4 +1,4 @@
-package lddldataapi
+package types
 
 import (
 	"container/heap"

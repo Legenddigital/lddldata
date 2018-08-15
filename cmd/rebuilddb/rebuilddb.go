@@ -7,18 +7,18 @@ import (
 	"runtime/pprof"
 	"sync"
 
-	"github.com/btcsuite/btclog"
 	"github.com/Legenddigital/lddld/rpcclient"
 	"github.com/Legenddigital/lddldata/db/lddlsqlite"
 	"github.com/Legenddigital/lddldata/rpcutils"
 	"github.com/Legenddigital/lddldata/stakedb"
+	"github.com/Legenddigital/slog"
 )
 
 var (
-	backendLog      *btclog.Backend
-	rpcclientLogger btclog.Logger
-	sqliteLogger    btclog.Logger
-	stakedbLogger   btclog.Logger
+	backendLog      *slog.Backend
+	rpcclientLogger slog.Logger
+	sqliteLogger    slog.Logger
+	stakedbLogger   slog.Logger
 )
 
 func init() {
@@ -27,7 +27,7 @@ func init() {
 		fmt.Printf("Unable to start logger: %v", err)
 		os.Exit(1)
 	}
-	backendLog = btclog.NewBackend(log.Writer())
+	backendLog = slog.NewBackend(log.Writer())
 	rpcclientLogger = backendLog.Logger("RPC")
 	rpcclient.UseLogger(rpcclientLogger)
 	sqliteLogger = backendLog.Logger("DSQL")
@@ -78,7 +78,8 @@ func mainCore() int {
 	// Sqlite output
 	dbInfo := lddlsqlite.DBInfo{FileName: cfg.DBFileName}
 	//sqliteDB, err := lddlsqlite.InitDB(&dbInfo)
-	sqliteDB, cleanupDB, err := lddlsqlite.InitWiredDB(&dbInfo, nil, client, activeChain)
+	sqliteDB, cleanupDB, err := lddlsqlite.InitWiredDB(&dbInfo, nil, client,
+		activeChain, "rebuild_data")
 	defer cleanupDB()
 	if err != nil {
 		log.Errorf("Unable to initialize SQLite database: %v", err)
@@ -107,7 +108,7 @@ func mainCore() int {
 	waitSync.Add(1)
 	//go sqliteDB.SyncDB(&waitSync, quit)
 	var height int64
-	height, err = sqliteDB.SyncDBWithPoolValue(&waitSync, quit)
+	height, err = sqliteDB.SyncDB(&waitSync, quit, nil, 0)
 	if err != nil {
 		log.Error(err)
 	}

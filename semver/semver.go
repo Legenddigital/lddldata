@@ -1,5 +1,4 @@
-// Copyright (c) 2016 The Decred developers
-// Copyright (c) 2018 The Legenddigital developers
+// Copyright (c) 2016 The Legenddigital developers
 // Use of this source code is governed by an ISC
 // license that can be found in the LICENSE file.
 
@@ -17,9 +16,8 @@ type Semver struct {
 	major, minor, patch uint32
 }
 
-// SemverCompatible evaluates if the versions passed are compatible and returns a
-// bool
-func SemverCompatible(required, actual Semver) bool {
+// Compatible decides if the actual version is compatible with the required one.
+func Compatible(required, actual Semver) bool {
 	switch {
 	case required.major != actual.major:
 		return false

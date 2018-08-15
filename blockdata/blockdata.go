@@ -14,7 +14,7 @@ import (
 	"github.com/Legenddigital/lddld/lddlutil"
 	"github.com/Legenddigital/lddld/rpcclient"
 	"github.com/Legenddigital/lddld/wire"
-	apitypes "github.com/Legenddigital/lddldata/lddldataapi"
+	apitypes "github.com/Legenddigital/lddldata/api/types"
 	"github.com/Legenddigital/lddldata/stakedb"
 	"github.com/Legenddigital/lddldata/txhelpers"
 )
@@ -31,6 +31,7 @@ type BlockData struct {
 	ExtraInfo        apitypes.BlockExplorerExtraInfo
 	PriceWindowNum   int
 	IdxBlockInWindow int
+	WinningTickets   []string
 }
 
 // ToStakeInfoExtended returns an apitypes.StakeInfoExtended object from the
@@ -75,6 +76,8 @@ func (b *BlockData) ToBlockSummary() apitypes.BlockDataBasic {
 		PoolInfo:   b.PoolInfo,
 	}
 }
+
+// ToBlockExplorerSummary returns a BlockExplorerBasic
 func (b *BlockData) ToBlockExplorerSummary() apitypes.BlockExplorerBasic {
 	t := time.Unix(b.Header.Time, 0)
 	ftime := t.Format("2006-01-02 15:04:05")
@@ -159,12 +162,12 @@ func (t *Collector) CollectBlockInfo(hash *chainhash.Hash) (*apitypes.BlockDataB
 	var found bool
 	if ticketPoolInfo, found = t.stakeDB.PoolInfo(*hash); !found {
 		log.Infof("Unable to find block (%s) in pool info cache, trying best block.", hash.String())
-		tpi, sdbHeight := t.stakeDB.PoolInfoBest()
-		if sdbHeight != height {
-			log.Warnf("Collected block height %d != stake db height %d. Pool info "+
-				"will not match the rest of this block's data.", height, sdbHeight)
+		ticketPoolInfo = t.stakeDB.PoolInfoBest()
+		if ticketPoolInfo.Height != height {
+			log.Warnf("Collected block height %d != stake db height %d. Pool "+
+				"info will not match the rest of this block's data.",
+				height, ticketPoolInfo.Height)
 		}
-		ticketPoolInfo = &tpi
 	}
 
 	// Fee info

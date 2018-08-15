@@ -1,3 +1,4 @@
+// Copyright (c) 2018, The Legenddigital developers
 // Copyright (c) 2017, Jonathan Chappelow
 // See LICENSE for details.
 
@@ -7,11 +8,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/pprof"
 	"strings"
 	"sync"
@@ -19,16 +22,22 @@ import (
 
 	"github.com/Legenddigital/lddld/chaincfg/chainhash"
 	"github.com/Legenddigital/lddld/rpcclient"
+	"github.com/Legenddigital/lddldata/api"
+	"github.com/Legenddigital/lddldata/api/insight"
 	"github.com/Legenddigital/lddldata/blockdata"
 	"github.com/Legenddigital/lddldata/db/dbtypes"
 	"github.com/Legenddigital/lddldata/db/lddlpg"
 	"github.com/Legenddigital/lddldata/db/lddlsqlite"
 	"github.com/Legenddigital/lddldata/explorer"
 	"github.com/Legenddigital/lddldata/mempool"
+	m "github.com/Legenddigital/lddldata/middleware"
+	notify "github.com/Legenddigital/lddldata/notification"
 	"github.com/Legenddigital/lddldata/rpcutils"
 	"github.com/Legenddigital/lddldata/semver"
 	"github.com/Legenddigital/lddldata/txhelpers"
+	"github.com/Legenddigital/lddldata/version"
 	"github.com/go-chi/chi"
+	"github.com/google/gops/agent"
 )
 
 // mainCore does all the work. Deferred functions do not run after os.Exit(),
@@ -46,37 +55,6 @@ func mainCore() error {
 		}
 	}()
 
-	// PostgreSQL
-	usePG := !cfg.LiteMode
-	var db *lddlpg.ChainDB
-	if usePG {
-		pgHost, pgPort := cfg.PGHost, ""
-		if !strings.HasPrefix(pgHost, "/") {
-			pgHost, pgPort, err = net.SplitHostPort(cfg.PGHost)
-			if err != nil {
-				return fmt.Errorf("SplitHostPort failed: %v", err)
-			}
-		}
-		dbi := lddlpg.DBInfo{
-			Host:   pgHost,
-			Port:   pgPort,
-			User:   cfg.PGUser,
-			Pass:   cfg.PGPass,
-			DBName: cfg.PGDBName,
-		}
-		db, err = lddlpg.NewChainDB(&dbi, activeChain)
-		if db != nil {
-			defer db.Close()
-		}
-		if err != nil {
-			return err
-		}
-
-		if err = db.SetupTables(); err != nil {
-			return err
-		}
-	}
-
 	if cfg.CPUProfile != "" {
 		var f *os.File
 		f, err = os.Create(cfg.CPUProfile)
@@ -87,32 +65,33 @@ func mainCore() error {
 		defer pprof.StopCPUProfile()
 	}
 
+	if cfg.UseGops {
+		// Start gops diagnostic agent, without shutdown cleanup
+		if err = agent.Listen(agent.Options{}); err != nil {
+			return err
+		}
+		defer agent.Close()
+	}
+
 	// Start with version info
-	log.Infof(appName+" version %s", ver.String())
+	ver := &version.Ver
+	log.Infof(version.AppName+" version %s", ver)
 
-	//log.Debugf("Output folder: %v", cfg.OutFolder)
-	log.Debugf("Log folder: %v", cfg.LogDir)
-
+	// PostgreSQL
+	usePG := cfg.FullMode
 	if usePG {
 		log.Info(`Running in full-functionality mode with PostgreSQL backend enabled.`)
 	} else {
 		log.Info(`Running in "Lite" mode with only SQLite backend and limited functionality.`)
 	}
 
-	// // Create data output folder if it does not already exist
-	// if err = os.MkdirAll(cfg.OutFolder, 0750); err != nil {
-	// 	log.Errorf("Failed to create data output folder %s. Error: %s\n",
-	// 		cfg.OutFolder, err.Error())
-	// 	return 2
-	// }
-
 	// Connect to lddld RPC server using websockets
 
 	// Set up the notification handler to deliver blocks through a channel.
-	makeNtfnChans(cfg)
+	notify.MakeNtfnChans(cfg.MonitorMempool, usePG)
 
 	// Daemon client connection
-	ntfnHandlers, collectionQueue := makeNodeNtfnHandlers(cfg)
+	ntfnHandlers, collectionQueue := notify.MakeNodeNtfnHandlers()
 	lddldClient, nodeVer, err := connectNodeRPC(cfg, ntfnHandlers)
 	if err != nil || lddldClient == nil {
 		return fmt.Errorf("Connection to lddld failed: %v", err)
@@ -120,7 +99,7 @@ func mainCore() error {
 
 	defer func() {
 		// Closing these channels should be unnecessary if quit was handled right
-		closeNtfnChans()
+		notify.CloseNtfnChans()
 
 		if lddldClient != nil {
 			log.Infof("Closing connection to lddld.")
@@ -139,21 +118,66 @@ func mainCore() error {
 	log.Infof("Connected to lddld (JSON-RPC API v%s) on %v",
 		nodeVer.String(), curnet.String())
 
-	// Another (horrible) example of saving to a map in memory
-	// blockDataMapSaver := NewBlockDataToMemdb()
-	// blockDataSavers = append(blockDataSavers, blockDataMapSaver)
+	if curnet != activeNet.Net {
+		log.Criticalf("Network of connected node, %s, does not match expected "+
+			"network, %s.", activeNet.Net, curnet)
+		return fmt.Errorf("expected network %s, got %s", activeNet.Net, curnet)
+	}
 
 	// Sqlite output
-	dbInfo := lddlsqlite.DBInfo{FileName: cfg.DBFileName}
-	//sqliteDB, err := lddlsqlite.InitDB(&dbInfo)
-	sqliteDB, cleanupDB, err := lddlsqlite.InitWiredDB(&dbInfo,
-		ntfnChans.updateStatusDBHeight, lddldClient, activeChain)
+	dbPath := filepath.Join(cfg.DataDir, cfg.DBFileName)
+	dbInfo := lddlsqlite.DBInfo{FileName: dbPath}
+	baseDB, cleanupDB, err := lddlsqlite.InitWiredDB(&dbInfo,
+		notify.NtfnChans.UpdateStatusDBHeight, lddldClient, activeChain, cfg.DataDir)
 	defer cleanupDB()
 	if err != nil {
 		return fmt.Errorf("Unable to initialize SQLite database: %v", err)
 	}
 	log.Infof("SQLite DB successfully opened: %s", cfg.DBFileName)
-	defer sqliteDB.Close()
+	defer baseDB.Close()
+
+	// PostgreSQL
+	var auxDB *lddlpg.ChainDB
+	var newPGIndexes, updateAllAddresses, updateAllVotes bool
+	if usePG {
+		pgHost, pgPort := cfg.PGHost, ""
+		if !strings.HasPrefix(pgHost, "/") {
+			pgHost, pgPort, err = net.SplitHostPort(cfg.PGHost)
+			if err != nil {
+				return fmt.Errorf("SplitHostPort failed: %v", err)
+			}
+		}
+		dbi := lddlpg.DBInfo{
+			Host:   pgHost,
+			Port:   pgPort,
+			User:   cfg.PGUser,
+			Pass:   cfg.PGPass,
+			DBName: cfg.PGDBName,
+		}
+		auxDB, err = lddlpg.NewChainDB(&dbi, activeChain, baseDB.GetStakeDB(), !cfg.NoDevPrefetch)
+		if auxDB != nil {
+			defer auxDB.Close()
+		}
+		if err != nil {
+			return err
+		}
+
+		if err = auxDB.VersionCheck(); err != nil {
+			return err
+		}
+
+		var idxExists bool
+		idxExists, err = auxDB.ExistsIndexVinOnVins()
+		if !idxExists || err != nil {
+			newPGIndexes = true
+			log.Infof("Indexes not found. Forcing new index creation.")
+		}
+
+		idxExists, err = auxDB.ExistsIndexAddressesVoutIDAddress()
+		if !idxExists || err != nil {
+			updateAllAddresses = true
+		}
+	}
 
 	// Ctrl-C to shut down.
 	// Nothing should be sent the quit channel.  It should only be closed.
@@ -176,90 +200,78 @@ func mainCore() error {
 		return fmt.Errorf("Unable to get block from node: %v", err)
 	}
 
-	var newPGIndexes, updateAllAddresses bool
+	// When in lite mode, baseDB should get blocks without having to coordinate
+	// with auxDB. Setting fetchToHeight to a large number allows this.
+	var fetchToHeight = int64(math.MaxInt32)
 	if usePG {
-		heightDB, err := db.HeightDB()
+		// Get the last block added to the aux DB
+		var heightDB uint64
+		heightDB, err = auxDB.HeightDB()
+		lastBlockPG := int64(heightDB)
 		if err != nil {
 			if err != sql.ErrNoRows {
 				return fmt.Errorf("Unable to get height from PostgreSQL DB: %v", err)
 			}
-			heightDB = 0
+			lastBlockPG = -1
 		}
-		blocksBehind := height - int64(heightDB)
+
+		// Allow stakedb to catch up to the auxDB, but after fetchToHeight,
+		// stakedb must receive block signals from auxDB.
+		fetchToHeight = lastBlockPG + 1
+
+		// PG height and StakeDatabase height must be equal. StakeDatabase will
+		// catch up automatically if it is behind, but we must manually rewind
+		// it here if it is ahead of PG.
+		stakedbHeight := int64(baseDB.GetStakeDB().Height())
+		if uint64(stakedbHeight) > heightDB {
+			// rewind stakedb
+			log.Infof("Rewinding StakeDatabase from %d to %d.", stakedbHeight, lastBlockPG)
+			stakedbHeight, err = baseDB.RewindStakeDB(lastBlockPG, quit)
+			if err != nil {
+				return fmt.Errorf("RewindStakeDB failed: %v", err)
+			}
+			if stakedbHeight != lastBlockPG {
+				return fmt.Errorf("failed to rewind stakedb: got %d, expecting %d",
+					stakedbHeight, lastBlockPG)
+			}
+		}
+
+		// How far auxDB is behind the node
+		blocksBehind := height - lastBlockPG
 		if blocksBehind < 0 {
 			return fmt.Errorf("Node is still syncing. Node height = %d, "+
 				"DB height = %d", height, heightDB)
 		}
 		if blocksBehind > 7500 {
-			log.Infof("Setting PSQL sync to rebuild address table after large "+
+			log.Warnf("Setting PSQL sync to rebuild address table after large "+
 				"import (%d blocks).", blocksBehind)
 			updateAllAddresses = true
 			if blocksBehind > 40000 {
-				log.Infof("Setting PSQL sync to drop indexes prior to bulk data "+
+				log.Warnf("Setting PSQL sync to drop indexes prior to bulk data "+
 					"import (%d blocks).", blocksBehind)
 				newPGIndexes = true
 			}
 		}
+
+		// PG gets winning tickets out of baseDB's pool info cache, so it must
+		// be big enough to hold the needed blocks' info, and charged with the
+		// data from disk. The cache is updated on each block connect.
+		tpcSize := int(blocksBehind) + 20
+		log.Debugf("Setting ticket pool cache capacity to %d blocks", tpcSize)
+		err = baseDB.GetStakeDB().SetPoolCacheCapacity(tpcSize)
+		if err != nil {
+			return err
+		}
+
+		// Charge stakedb pool info cache, including previous PG blocks, up to
+		// best in sqlite.
+		if err = baseDB.ChargePoolInfoCache(int64(heightDB) - 2); err != nil {
+			return fmt.Errorf("Failed to charge pool info cache: %v", err)
+		}
 	}
 
-	// Simultaneously synchronize the ChainDB (PostgreSQL) and the block/stake
-	// info DB (sqlite). They don't communicate, so we'll just ensure they exit
-	// with the same best block height by calling them repeatedly in a loop.
-	var sqliteHeight, pgHeight int64
-	sqliteSyncRes := make(chan dbtypes.SyncResult)
-	pgSyncRes := make(chan dbtypes.SyncResult)
-	for {
-		// Launch the sync functions for both DBs
-		go sqliteDB.SyncDBAsync(sqliteSyncRes, quit)
-		go db.SyncChainDBAsync(pgSyncRes, lddldClient, quit,
-			newPGIndexes, updateAllAddresses)
-
-		// Wait for the results
-		sqliteRes := <-sqliteSyncRes
-		sqliteHeight = sqliteRes.Height
-		log.Infof("SQLite sync ended at height %d", sqliteHeight)
-
-		pgRes := <-pgSyncRes
-		pgHeight = pgRes.Height
-		if usePG {
-			log.Infof("PostgreSQL sync ended at height %d", pgHeight)
-		}
-
-		// See if there was a SIGINT (CTRL+C)
-		select {
-		case <-quit:
-			log.Info("Quit signal received during DB sync.")
-			return nil
-		default:
-		}
-
-		// Check for errors and combine if necessary
-		if sqliteRes.Error != nil {
-			if usePG && pgRes.Error != nil {
-				log.Error("lddlsqlite.SyncDBAsync AND lddlpg.SyncChainDBAsync "+
-					"failed at heights %d and %d, respectively.",
-					sqliteRes.Height, pgRes.Height)
-				errCombined := fmt.Sprintln(sqliteRes.Error, ", ", pgRes.Error)
-				return errors.New(errCombined)
-			}
-			log.Errorf("lddlsqlite.SyncDBAsync failed at height %d.", sqliteRes.Height)
-			return sqliteRes.Error
-		} else if usePG && pgRes.Error != nil {
-			log.Errorf("lddlpg.SyncChainDBAsync failed at height %d.", pgRes.Height)
-			return pgRes.Error
-		}
-
-		// Break loop to continue starting lddldata.
-		if !usePG || pgHeight == sqliteHeight {
-			break
-		}
-		log.Infof("Restarting sync with PostgreSQL at %d, SQLite at %d.",
-			pgHeight, sqliteHeight)
-		updateAllAddresses, newPGIndexes = false, false
-	}
-
-	// Block data collector
-	collector := blockdata.NewCollector(lddldClient, activeChain, sqliteDB.GetStakeDB())
+	// Block data collector. Needs a StakeDatabase too.
+	collector := blockdata.NewCollector(lddldClient, activeChain, baseDB.GetStakeDB())
 	if collector == nil {
 		return fmt.Errorf("Failed to create block data collector")
 	}
@@ -268,7 +280,7 @@ func mainCore() error {
 	var blockDataSavers []blockdata.BlockDataSaver
 	var mempoolSavers []mempool.MempoolDataSaver
 
-	blockDataSavers = append(blockDataSavers, db)
+	blockDataSavers = append(blockDataSavers, auxDB)
 
 	// For example, dumping all mempool fees with a custom saver
 	if cfg.DumpAllMPTix {
@@ -277,26 +289,96 @@ func mainCore() error {
 		mempoolSavers = append(mempoolSavers, mempoolFeeDumper)
 	}
 
-	blockDataSavers = append(blockDataSavers, &sqliteDB)
-	mempoolSavers = append(mempoolSavers, sqliteDB.MPC)
+	blockDataSavers = append(blockDataSavers, &baseDB)
+	mempoolSavers = append(mempoolSavers, baseDB.MPC)
 
-	// Start the explorer system
-	explore := explorer.New(&sqliteDB, db, cfg.UseRealIP, ver.String())
+	// Create the explorer system
+	explore := explorer.New(&baseDB, auxDB, cfg.UseRealIP, ver.String(), !cfg.NoDevPrefetch)
+	if explore == nil {
+		return fmt.Errorf("failed to create new explorer (templates missing?)")
+	}
 	explore.UseSIGToReloadTemplates()
 	defer explore.StopWebsocketHub()
+	defer explore.StopMempoolMonitor(notify.NtfnChans.ExpNewTxChan)
+
 	blockDataSavers = append(blockDataSavers, explore)
-	mempoolSavers = append(mempoolSavers, explore)
 
-	// Initial data summary for web ui
-	blockData, _, err := collector.Collect()
+	// Sync up with the blockchain
+	getSyncd := func(updateAddys, updateVotes, newPGInds bool,
+		fetchHeight int64) (int64, int64, error) {
+		// Simultaneously synchronize the ChainDB (PostgreSQL) and the block/stake
+		// info DB (sqlite). Results are returned over channels:
+		sqliteSyncRes := make(chan dbtypes.SyncResult)
+		pgSyncRes := make(chan dbtypes.SyncResult)
+
+		// Synchronization between DBs via rpcutils.BlockGate
+		smartClient := rpcutils.NewBlockGate(lddldClient, 10)
+
+		// stakedb (in baseDB) connects blocks *after* ChainDB retrieves them, but
+		// it has to get a notification channel first to receive them. The BlockGate
+		// will provide this for blocks after fetchHeight.
+		baseDB.SyncDBAsync(sqliteSyncRes, quit, smartClient, fetchHeight)
+
+		// Now that stakedb is either catching up or waiting for a block, start the
+		// auxDB sync, which is the master block getter, retrieving and making
+		// available blocks to the baseDB. In return, baseDB maintains a
+		// StakeDatabase at the best block's height.
+		go auxDB.SyncChainDBAsync(pgSyncRes, smartClient, quit,
+			updateAddys, updateVotes, newPGInds)
+
+		// Wait for the results
+		return waitForSync(sqliteSyncRes, pgSyncRes, usePG, quit)
+	}
+	baseDBHeight, auxDBHeight, err := getSyncd(updateAllAddresses,
+		updateAllVotes, newPGIndexes, fetchToHeight)
 	if err != nil {
-		return fmt.Errorf("Block data collection for initial summary failed: %v",
-			err.Error())
+		return err
 	}
 
-	if err = explore.Store(blockData, nil); err != nil {
-		return fmt.Errorf("Failed to store initial block data for explorer pages: %v", err.Error())
+	// The sync routines may have lengthy tasks, such as table indexing, that
+	// follow main sync loop. Before enabling the chain monitors, ensure the DBs
+	// are at the node's best block.
+	updateAllAddresses, updateAllVotes, newPGIndexes = false, false, false
+	_, height, err = lddldClient.GetBestBlock()
+	if err != nil {
+		return fmt.Errorf("unable to get block from node: %v", err)
 	}
+	for baseDBHeight < height {
+		fetchToHeight = auxDBHeight + 1
+		baseDBHeight, _, err = getSyncd(updateAllAddresses, updateAllVotes,
+			newPGIndexes, fetchToHeight)
+		if err != nil {
+			return err
+		}
+		_, height, err = lddldClient.GetBestBlock()
+		if err != nil {
+			return fmt.Errorf("unable to get block from node: %v", err)
+		}
+	}
+	log.Infof("All ready, at height %d.", baseDBHeight)
+
+	if cfg.SyncAndQuit {
+		return nil
+	}
+
+	// Register for notifications from lddld
+	cerr := notify.RegisterNodeNtfnHandlers(lddldClient)
+	if cerr != nil {
+		return fmt.Errorf("RPC client error: %v (%v)", cerr.Error(), cerr.Cause())
+	}
+	// now create and start the monitors that respond to the notification chans
+
+	// Create the insight socket server and add it to block savers if in pg mode
+	var insightSocketServer *insight.SocketServer
+	if usePG {
+		insightSocketServer, err = insight.NewSocketServer(notify.NtfnChans.InsightNewTxChan, activeChain)
+		if err == nil {
+			blockDataSavers = append(blockDataSavers, insightSocketServer)
+		} else {
+			return fmt.Errorf("Could not create Insight socket.io server: %v", err)
+		}
+	}
+
 	// WaitGroup for the monitor goroutines
 	var wg sync.WaitGroup
 
@@ -307,29 +389,16 @@ func mainCore() error {
 	reorgBlockDataSavers := []blockdata.BlockDataSaver{explore}
 	wsChainMonitor := blockdata.NewChainMonitor(collector, blockDataSavers,
 		reorgBlockDataSavers, quit, &wg, addrMap,
-		ntfnChans.connectChan, ntfnChans.recvTxBlockChan,
-		ntfnChans.reorgChanBlockData)
-	wg.Add(2)
-	go wsChainMonitor.BlockConnectedHandler()
-	// The blockdata reorg handler disables collection during reorg, leaving
-	// lddlsqlite to do the switch, except for the last block which gets
-	// collected and stored via reorgBlockDataSavers.
-	go wsChainMonitor.ReorgHandler()
+		notify.NtfnChans.ConnectChan, notify.NtfnChans.RecvTxBlockChan,
+		notify.NtfnChans.ReorgChanBlockData)
 
 	// Blockchain monitor for the stake DB
-	sdbChainMonitor := sqliteDB.NewStakeDBChainMonitor(quit, &wg,
-		ntfnChans.connectChanStakeDB, ntfnChans.reorgChanStakeDB)
-	wg.Add(2)
-	go sdbChainMonitor.BlockConnectedHandler()
-	go sdbChainMonitor.ReorgHandler()
+	sdbChainMonitor := baseDB.NewStakeDBChainMonitor(quit, &wg,
+		notify.NtfnChans.ConnectChanStakeDB, notify.NtfnChans.ReorgChanStakeDB)
 
 	// Blockchain monitor for the wired sqlite DB
-	wiredDBChainMonitor := sqliteDB.NewChainMonitor(collector, quit, &wg,
-		ntfnChans.connectChanWiredDB, ntfnChans.reorgChanWiredDB)
-	wg.Add(2)
-	// lddlsqlite does not handle new blocks except during reorg
-	go wiredDBChainMonitor.BlockConnectedHandler()
-	go wiredDBChainMonitor.ReorgHandler()
+	wiredDBChainMonitor := baseDB.NewChainMonitor(collector, quit, &wg,
+		notify.NtfnChans.ConnectChanWiredDB, notify.NtfnChans.ReorgChanWiredDB)
 
 	// Setup the synchronous handler functions called by the collectionQueue via
 	// OnBlockConnected.
@@ -338,6 +407,37 @@ func mainCore() error {
 		wsChainMonitor.BlockConnectedSync,      // 2. blockdata for regular block data collection and storage
 		wiredDBChainMonitor.BlockConnectedSync, // 3. lddlsqlite for sqlite DB reorg handling
 	})
+
+	// Initial data summary for web ui. stakedb must be at the same height, so
+	// we get do this before starting the monitors.
+	blockData, _, err := collector.Collect()
+	if err != nil {
+		return fmt.Errorf("Block data collection for initial summary failed: %v",
+			err.Error())
+	}
+	if err = explore.Store(blockData, nil); err != nil {
+		return fmt.Errorf("Failed to store initial block data for explorer pages: %v", err.Error())
+	}
+
+	explore.StartMempoolMonitor(notify.NtfnChans.ExpNewTxChan)
+
+	// blockdata collector
+	wg.Add(2)
+	go wsChainMonitor.BlockConnectedHandler()
+	// The blockdata reorg handler disables collection during reorg, leaving
+	// lddlsqlite to do the switch, except for the last block which gets
+	// collected and stored via reorgBlockDataSavers.
+	go wsChainMonitor.ReorgHandler()
+
+	// StakeDatabase
+	wg.Add(2)
+	go sdbChainMonitor.BlockConnectedHandler()
+	go sdbChainMonitor.ReorgHandler()
+
+	// lddlsqlite does not handle new blocks except during reorg
+	wg.Add(2)
+	go wiredDBChainMonitor.BlockConnectedHandler()
+	go wiredDBChainMonitor.ReorgHandler()
 
 	if cfg.MonitorMempool {
 		mpoolCollector := mempool.NewMempoolDataCollector(lddldClient, activeChain)
@@ -352,14 +452,8 @@ func mainCore() error {
 		}
 
 		// Store initial MP data
-		if err = sqliteDB.MPC.StoreMPData(mpData, time.Now()); err != nil {
+		if err = baseDB.MPC.StoreMPData(mpData, time.Now()); err != nil {
 			return fmt.Errorf("Failed to store initial mempool data (wiredDB): %v",
-				err.Error())
-		}
-
-		// Store initial MP data to explore
-		if err = explore.StoreMPData(mpData, time.Now()); err != nil {
-			return fmt.Errorf("Failed to store initial mempool data (explore): %v",
 				err.Error())
 		}
 
@@ -376,7 +470,7 @@ func mainCore() error {
 		maxi := time.Duration(cfg.MempoolMaxInterval) * time.Second
 
 		mpm := mempool.NewMempoolMonitor(mpoolCollector, mempoolSavers,
-			ntfnChans.newTxChan, quit, &wg, newTicketLimit, mini, maxi, mpi)
+			notify.NtfnChans.NewTxChan, quit, &wg, newTicketLimit, mini, maxi, mpi)
 		wg.Add(1)
 		go mpm.TxHandler(lddldClient)
 	}
@@ -387,21 +481,15 @@ func mainCore() error {
 	default:
 	}
 
-	// Register for notifications now that the monitors are listening
-	cerr := registerNodeNtfnHandlers(lddldClient)
-	if cerr != nil {
-		return fmt.Errorf("RPC client error: %v (%v)", cerr.Error(), cerr.Cause())
-	}
-
 	// Start web API
-	app := newContext(lddldClient, &sqliteDB, cfg.IndentJSON)
+	app := api.NewContext(lddldClient, &baseDB, auxDB, cfg.IndentJSON)
 	// Start notification hander to keep /status up-to-date
 	wg.Add(1)
 	go app.StatusNtfnHandler(&wg, quit)
 	// Initial setting of db_height. Subsequently, Store() will send this.
-	ntfnChans.updateStatusDBHeight <- uint32(sqliteDB.GetHeight())
+	notify.NtfnChans.UpdateStatusDBHeight <- uint32(baseDB.GetHeight())
 
-	apiMux := newAPIRouter(app, cfg.UseRealIP)
+	apiMux := api.NewAPIRouter(app, cfg.UseRealIP)
 
 	webMux := chi.NewRouter()
 	webMux.Get("/", explore.Home)
@@ -419,11 +507,24 @@ func mainCore() error {
 
 	webMux.Mount("/explorer", explore.Mux)
 	webMux.Get("/blocks", explore.Blocks)
+	webMux.Get("/mempool", explore.Mempool)
+	webMux.Get("/parameters", explore.ParametersPage)
 	webMux.With(explore.BlockHashPathOrIndexCtx).Get("/block/{blockhash}", explore.Block)
 	webMux.With(explorer.TransactionHashCtx).Get("/tx/{txid}", explore.TxPage)
 	webMux.With(explorer.AddressPathCtx).Get("/address/{address}", explore.AddressPage)
 	webMux.Get("/decodetx", explore.DecodeTxPage)
 	webMux.Get("/search", explore.Search)
+
+	if usePG {
+		chainDBRPC, _ := lddlpg.NewChainDBRPC(auxDB, lddldClient)
+		insightApp := insight.NewInsightContext(lddldClient, chainDBRPC, activeChain, &baseDB, cfg.IndentJSON)
+		insightMux := insight.NewInsightApiRouter(insightApp, cfg.UseRealIP)
+		webMux.Mount("/insight/api", insightMux.Mux)
+
+		if insightSocketServer != nil {
+			webMux.Get("/insight/socket.io/", insightSocketServer.ServeHTTP)
+		}
+	}
 
 	// HTTP profiler
 	if cfg.HTTPProfile {
@@ -455,6 +556,60 @@ func main() {
 	os.Exit(0)
 }
 
+func waitForSync(base chan dbtypes.SyncResult, aux chan dbtypes.SyncResult,
+	useAux bool, quit chan struct{}) (int64, int64, error) {
+	baseRes := <-base
+	baseDBHeight := baseRes.Height
+	log.Infof("SQLite sync ended at height %d", baseDBHeight)
+	if baseRes.Error != nil {
+		log.Errorf("lddlsqlite.SyncDBAsync failed at height %d: %v.", baseDBHeight, baseRes.Error)
+		close(quit)
+		auxRes := <-aux
+		return baseDBHeight, auxRes.Height, baseRes.Error
+	}
+
+	auxRes := <-aux
+	auxDBHeight := auxRes.Height
+	log.Infof("PostgreSQL sync ended at height %d", auxDBHeight)
+
+	// See if there was a SIGINT (CTRL+C)
+	select {
+	case <-quit:
+		return baseDBHeight, auxDBHeight, fmt.Errorf("quit signal received during DB sync")
+	default:
+	}
+
+	if baseRes.Error != nil {
+		log.Errorf("lddlsqlite.SyncDBAsync failed at height %d.", baseDBHeight)
+		close(quit)
+		return baseDBHeight, auxDBHeight, baseRes.Error
+	}
+
+	if useAux {
+		// Check for errors and combine the messages if necessary
+		if auxRes.Error != nil {
+			close(quit)
+			if baseRes.Error != nil {
+				log.Error("lddlsqlite.SyncDBAsync AND lddlpg.SyncChainDBAsync "+
+					"failed at heights %d and %d, respectively.",
+					baseDBHeight, auxDBHeight)
+				errCombined := fmt.Sprintln(baseRes.Error, ", ", auxRes.Error)
+				return baseDBHeight, auxDBHeight, errors.New(errCombined)
+			}
+			log.Errorf("lddlpg.SyncChainDBAsync failed at height %d.", auxDBHeight)
+			return baseDBHeight, auxDBHeight, auxRes.Error
+		}
+
+		// DBs must finish at the same height
+		if auxDBHeight != baseDBHeight {
+			return baseDBHeight, auxDBHeight, fmt.Errorf("failed to hit same"+
+				"sync height for PostgreSQL (%d) and SQLite (%d)",
+				auxDBHeight, baseDBHeight)
+		}
+	}
+	return baseDBHeight, auxDBHeight, nil
+}
+
 func connectNodeRPC(cfg *config, ntfnHandlers *rpcclient.NotificationHandlers) (*rpcclient.Client, semver.Semver, error) {
 	return rpcutils.ConnectNodeRPC(cfg.LddldServ, cfg.LddldUser, cfg.LddldPass,
 		cfg.LddldCert, cfg.DisableDaemonTLS, ntfnHandlers)
@@ -462,22 +617,28 @@ func connectNodeRPC(cfg *config, ntfnHandlers *rpcclient.NotificationHandlers) (
 
 func listenAndServeProto(listen, proto string, mux http.Handler) error {
 	// Try to bind web server
+	server := http.Server{
+		Addr:         listen,
+		Handler:      mux,
+		ReadTimeout:  5 * time.Second,  // slow requests should not hold connections opened
+		WriteTimeout: 60 * time.Second, // hung responses must die
+	}
 	errChan := make(chan error)
 	if proto == "https" {
 		go func() {
-			errChan <- http.ListenAndServeTLS(listen, "lddldata.cert", "lddldata.key", mux)
+			errChan <- server.ListenAndServeTLS("lddldata.cert", "lddldata.key")
 		}()
 	} else {
 		go func() {
-			errChan <- http.ListenAndServe(listen, mux)
+			errChan <- server.ListenAndServe()
 		}()
 	}
 
 	// Briefly wait for an error and then return
-	t := time.NewTimer(3 * time.Second)
+	t := time.NewTimer(2 * time.Second)
 	select {
 	case err := <-errChan:
-		return fmt.Errorf("Failed to bind web server: %v", err)
+		return fmt.Errorf("Failed to bind web server promptly: %v", err)
 	case <-t.C:
 		expLog.Infof("Now serving explorer on %s://%v/", proto, listen)
 		apiLog.Infof("Now serving API on %s://%v/", proto, listen)
@@ -500,7 +661,7 @@ func FileServer(r chi.Router, path string, root http.FileSystem, CacheControlMax
 	}
 	path += "*"
 
-	r.With(CacheControl(CacheControlMaxAge)).Get(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	r.With(m.CacheControl(CacheControlMaxAge)).Get(path, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fs.ServeHTTP(w, r)
 	}))
 }
