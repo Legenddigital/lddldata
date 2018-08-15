@@ -3,7 +3,6 @@
 *.log
 *.log.*.gz
 *.bak
-.idea/
 debug
 *.cert
 *.key
@@ -13,12 +12,9 @@ vendor/
 *.orig
 *.db
 *.db-journal
-lddldata.sqlt.db*
 rebuilddb.conf
 rebuilddb2.conf
 cmd/rebuilddb/rebuilddb
-cmd/rebuilddb2/rebuilddb2
-rebuild_data/
 cmd/scanblocks/scanblocks
 fullscan.json
 *.swp
@@ -30,10 +26,3 @@ MANIFEST-*
 ffldb_stake*/
 *.pprof
 testnet/
-.DS_Store
-testdata/
-\.project
-test-data-repo
-lddldata-testdata-gitlfs
-lddldata-testdata
-.vendor-new

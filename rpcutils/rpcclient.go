@@ -15,7 +15,7 @@ import (
 	"github.com/Legenddigital/lddld/lddlutil"
 	"github.com/Legenddigital/lddld/rpcclient"
 	"github.com/Legenddigital/lddld/wire"
-	apitypes "github.com/Legenddigital/lddldata/api/types"
+	apitypes "github.com/Legenddigital/lddldata/lddldataapi"
 	"github.com/Legenddigital/lddldata/semver"
 	"github.com/Legenddigital/lddldata/txhelpers"
 )
@@ -75,7 +75,7 @@ func ConnectNodeRPC(host, user, pass, cert string, disableTLS bool,
 	lddldVer := ver["lddldjsonrpcapi"]
 	nodeVer = semver.NewSemver(lddldVer.Major, lddldVer.Minor, lddldVer.Patch)
 
-	if !semver.Compatible(requiredChainServerAPI, nodeVer) {
+	if !semver.SemverCompatible(requiredChainServerAPI, nodeVer) {
 		return nil, nodeVer, fmt.Errorf("Node JSON-RPC server does not have "+
 			"a compatible API version. Advertises %v but require %v",
 			nodeVer, requiredChainServerAPI)
@@ -219,48 +219,4 @@ func GetBlock(ind int64, client *rpcclient.Client) (*lddlutil.Block, *chainhash.
 	block := lddlutil.NewBlock(msgBlock)
 
 	return block, blockhash, nil
-}
-
-// GetBlockByHash gets the block with the given hash from a chain server.
-func GetBlockByHash(blockhash *chainhash.Hash, client *rpcclient.Client) (*lddlutil.Block, error) {
-	msgBlock, err := client.GetBlock(blockhash)
-	if err != nil {
-		return nil, fmt.Errorf("GetBlock failed (%s): %v", blockhash, err)
-	}
-	block := lddlutil.NewBlock(msgBlock)
-
-	return block, nil
-}
-
-// GetTransactionVerboseByID get a transaction by transaction id
-func GetTransactionVerboseByID(client *rpcclient.Client, txid string) (*lddljson.TxRawResult, error) {
-	txhash, err := chainhash.NewHashFromStr(txid)
-	if err != nil {
-		log.Errorf("Invalid transaction hash %s", txid)
-		return nil, err
-	}
-
-	txraw, err := client.GetRawTransactionVerbose(txhash)
-	if err != nil {
-		log.Errorf("GetRawTransactionVerbose failed for: %v", txhash)
-		return nil, err
-	}
-	return txraw, nil
-}
-
-// SearchRawTransaction fetch transactions the belong to an
-// address
-func SearchRawTransaction(client *rpcclient.Client, count int, address string) ([]*lddljson.SearchRawTransactionsResult, error) {
-	addr, err := lddlutil.DecodeAddress(address)
-	if err != nil {
-		log.Infof("Invalid address %s: %v", address, err)
-		return nil, err
-	}
-	//change the 1000 000 number demo for now
-	txs, err := client.SearchRawTransactionsVerbose(addr, 0, count,
-		true, true, nil)
-	if err != nil {
-		log.Warnf("SearchRawTransaction failed for address %s: %v", addr, err)
-	}
-	return txs, nil
 }

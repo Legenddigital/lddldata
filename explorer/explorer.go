@@ -1,20 +1,21 @@
-// Copyright (c) 2018, The Decred developers
-// Copyright (c) 2018, The Legenddigital developers
+// Package explorer handles the block explorer subsystem for generating the
+// explorer pages.
 // Copyright (c) 2017, The lddldata developers
 // See LICENSE for details.
-
-// package explorer handles the block explorer subsystem for generating the
-// explorer pages.
 package explorer
 
 import (
 	"fmt"
+	"html/template"
 	"math"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"reflect"
 	"runtime"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,11 +25,21 @@ import (
 	"github.com/Legenddigital/lddld/wire"
 	"github.com/Legenddigital/lddldata/blockdata"
 	"github.com/Legenddigital/lddldata/db/dbtypes"
-	"github.com/Legenddigital/lddldata/txhelpers"
+	"github.com/Legenddigital/lddldata/mempool"
 	humanize "github.com/dustin/go-humanize"
 	"github.com/go-chi/chi"
 	"github.com/go-chi/chi/middleware"
 	"github.com/rs/cors"
+)
+
+const (
+	homeTemplateIndex int = iota
+	rootTemplateIndex
+	blockTemplateIndex
+	txTemplateIndex
+	addressTemplateIndex
+	decodeTxTemplateIndex
+	errorTemplateIndex
 )
 
 const (
@@ -52,69 +63,16 @@ type explorerDataSourceLite interface {
 	SendRawTransaction(txhex string) (string, error)
 	GetHeight() int
 	GetChainParams() *chaincfg.Params
-	UnconfirmedTxnsForAddress(address string) (*txhelpers.AddressOutpoints, int64, error)
-	GetMempool() []MempoolTx
-	TxHeight(txid string) (height int64)
-	BlockSubsidy(height int64, voters uint16) *lddljson.GetBlockSubsidyResult
-	GetSqliteChartsData() (map[string]*dbtypes.ChartsData, error)
+	CountUnconfirmedTransactions(address string, maxUnconfirmedPossible int64) (int64, error)
 }
 
 // explorerDataSource implements extra data retrieval functions that require a
-// faster solution than RPC, or additional functionality.
+// faster solution than RPC.
 type explorerDataSource interface {
 	SpendingTransaction(fundingTx string, vout uint32) (string, uint32, int8, error)
 	SpendingTransactions(fundingTxID string) ([]string, []uint32, []uint32, error)
-	PoolStatusForTicket(txid string) (dbtypes.TicketSpendType, dbtypes.TicketPoolStatus, error)
-	AddressHistory(address string, N, offset int64, txnType dbtypes.AddrTxnType) ([]*dbtypes.AddressRow, *AddressBalance, error)
-	DevBalance() (*AddressBalance, error)
+	AddressHistory(address string, N, offset int64) ([]*dbtypes.AddressRow, *AddressBalance, error)
 	FillAddressTransactions(addrInfo *AddressInfo) error
-	BlockMissedVotes(blockHash string) ([]string, error)
-	AgendaVotes(agendaID string, chartType int) (*dbtypes.AgendaVoteChoices, error)
-	GetPgChartsData() (map[string]*dbtypes.ChartsData, error)
-	GetTicketsPriceByHeight() (*dbtypes.ChartsData, error)
-}
-
-// cacheChartsData holds the prepopulated data that is used to draw the charts
-var cacheChartsData = new(ChartDataCounter)
-
-// GetChartTypeData is a thread-safe way to access the chart type data.
-func GetChartTypeData(chartType string) (data *dbtypes.ChartsData, ok bool) {
-	cacheChartsData.RLock()
-	defer cacheChartsData.RUnlock()
-
-	data, ok = cacheChartsData.Data[chartType]
-	return
-}
-
-// TicketStatusText generates the text to display on the explorer's transaction
-// page for the "POOL STATUS" field.
-func TicketStatusText(s dbtypes.TicketSpendType, p dbtypes.TicketPoolStatus) string {
-	switch p {
-	case dbtypes.PoolStatusLive:
-		return "In Live Ticket Pool"
-	case dbtypes.PoolStatusVoted:
-		return "Voted"
-	case dbtypes.PoolStatusExpired:
-		switch s {
-		case dbtypes.TicketUnspent:
-			return "Expired, Unrevoked"
-		case dbtypes.TicketRevoked:
-			return "Expired, Revoked"
-		default:
-			return "invalid ticket state"
-		}
-	case dbtypes.PoolStatusMissed:
-		switch s {
-		case dbtypes.TicketUnspent:
-			return "Missed, Unrevoked"
-		case dbtypes.TicketRevoked:
-			return "Missed, Reevoked"
-		default:
-			return "invalid ticket state"
-		}
-	default:
-		return "Immature"
-	}
 }
 
 type explorerUI struct {
@@ -122,8 +80,9 @@ type explorerUI struct {
 	blockData       explorerDataSourceLite
 	explorerSource  explorerDataSource
 	liteMode        bool
-	devPrefetch     bool
-	templates       templates
+	templates       []*template.Template
+	templateFiles   map[string]string
+	templateHelpers template.FuncMap
 	wsHub           *WebsocketHub
 	NewBlockDataMtx sync.RWMutex
 	NewBlockData    *BlockBasic
@@ -131,11 +90,74 @@ type explorerUI struct {
 	MempoolData     *MempoolInfo
 	ChainParams     *chaincfg.Params
 	Version         string
-	NetName         string
 }
 
 func (exp *explorerUI) reloadTemplates() error {
-	return exp.templates.reloadTemplates()
+	homeTemplate, err := template.New("home").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["home"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		return err
+	}
+
+	explorerTemplate, err := template.New("explorer").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["explorer"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		return err
+	}
+
+	blockTemplate, err := template.New("block").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["block"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		return err
+	}
+
+	txTemplate, err := template.New("tx").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["tx"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		return err
+	}
+
+	addressTemplate, err := template.New("address").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["address"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		return err
+	}
+
+	decodeTxTemplate, err := template.New("rawtx").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["rawtx"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		return err
+	}
+
+	errorTemplate, err := template.New("error").ParseFiles(
+		exp.templateFiles["error"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		return err
+	}
+
+	exp.templates[homeTemplateIndex] = homeTemplate
+	exp.templates[rootTemplateIndex] = explorerTemplate
+	exp.templates[blockTemplateIndex] = blockTemplate
+	exp.templates[txTemplateIndex] = txTemplate
+	exp.templates[addressTemplateIndex] = addressTemplate
+	exp.templates[decodeTxTemplateIndex] = decodeTxTemplate
+	exp.templates[errorTemplateIndex] = errorTemplate
+
+	return nil
 }
 
 // See reloadsig*.go for an exported method
@@ -160,27 +182,22 @@ func (exp *explorerUI) reloadTemplatesSig(sig os.Signal) {
 
 // StopWebsocketHub stops the websocket hub
 func (exp *explorerUI) StopWebsocketHub() {
-	if exp == nil {
-		return
-	}
 	log.Info("Stopping websocket hub.")
 	exp.wsHub.Stop()
 }
 
 // New returns an initialized instance of explorerUI
 func New(dataSource explorerDataSourceLite, primaryDataSource explorerDataSource,
-	useRealIP bool, appVersion string, devPrefetch bool) *explorerUI {
+	useRealIP bool, appVersion string) *explorerUI {
 	exp := new(explorerUI)
 	exp.Mux = chi.NewRouter()
 	exp.blockData = dataSource
 	exp.explorerSource = primaryDataSource
 	exp.MempoolData = new(MempoolInfo)
 	exp.Version = appVersion
-	exp.devPrefetch = devPrefetch
 	// explorerDataSource is an interface that could have a value of pointer
 	// type, and if either is nil this means lite mode.
 	if exp.explorerSource == nil || reflect.ValueOf(exp.explorerSource).IsNil() {
-		log.Debugf("Primary data source not available. Operating explorer in lite mode.")
 		exp.liteMode = true
 	}
 
@@ -190,7 +207,6 @@ func New(dataSource explorerDataSourceLite, primaryDataSource explorerDataSource
 
 	params := exp.blockData.GetChainParams()
 	exp.ChainParams = params
-	exp.NetName = netName(exp.ChainParams)
 
 	// Development subsidy address of the current network
 	devSubsidyAddress, err := dbtypes.DevSubsidyAddress(params)
@@ -198,96 +214,234 @@ func New(dataSource explorerDataSourceLite, primaryDataSource explorerDataSource
 		log.Warnf("explorer.New: %v", err)
 	}
 	log.Debugf("Organization address: %s", devSubsidyAddress)
-
-	// Set default static values for ExtraInfo
 	exp.ExtraInfo = &HomeInfo{
 		DevAddress: devSubsidyAddress,
-		Params: ChainParams{
-			WindowSize:       exp.ChainParams.StakeDiffWindowSize,
-			RewardWindowSize: exp.ChainParams.SubsidyReductionInterval,
-			BlockTime:        exp.ChainParams.TargetTimePerBlock.Nanoseconds(),
-			MeanVotingBlocks: txhelpers.CalcMeanVotingBlocks(params),
-		},
-		PoolInfo: TicketPoolInfo{
-			Target: exp.ChainParams.TicketPoolSize * exp.ChainParams.TicketsPerBlock,
-		},
 	}
 
-	log.Infof("Mean Voting Blocks calculated: %d", exp.ExtraInfo.Params.MeanVotingBlocks)
+	exp.templateFiles = make(map[string]string)
+	exp.templateFiles["home"] = filepath.Join("views", "home.tmpl")
+	exp.templateFiles["explorer"] = filepath.Join("views", "explorer.tmpl")
+	exp.templateFiles["block"] = filepath.Join("views", "block.tmpl")
+	exp.templateFiles["tx"] = filepath.Join("views", "tx.tmpl")
+	exp.templateFiles["extras"] = filepath.Join("views", "extras.tmpl")
+	exp.templateFiles["address"] = filepath.Join("views", "address.tmpl")
+	exp.templateFiles["rawtx"] = filepath.Join("views", "rawtx.tmpl")
+	exp.templateFiles["error"] = filepath.Join("views", "error.tmpl")
 
-	noTemplateError := func(err error) *explorerUI {
-		log.Errorf("Unable to create new html template: %v", err)
-		return nil
-	}
-	tmpls := []string{"home", "explorer", "mempool", "block", "tx", "address",
-		"rawtx", "status", "parameters", "agenda", "agendas", "charts"}
-
-	tempDefaults := []string{"extras"}
-
-	exp.templates = newTemplates("views", tempDefaults, makeTemplateFuncMap(exp.ChainParams))
-
-	for _, name := range tmpls {
-		if err := exp.templates.addTemplate(name); err != nil {
-			return noTemplateError(err)
+	toInt64 := func(v interface{}) int64 {
+		switch vt := v.(type) {
+		case int64:
+			return vt
+		case int32:
+			return int64(vt)
+		case uint32:
+			return int64(vt)
+		case uint64:
+			return int64(vt)
+		case int:
+			return int64(vt)
+		case int16:
+			return int64(vt)
+		case uint16:
+			return int64(vt)
+		default:
+			return math.MinInt64
 		}
 	}
 
-	if !exp.liteMode {
-		exp.prePopulateChartsData()
+	exp.templateHelpers = template.FuncMap{
+		"add": func(a int64, b int64) int64 {
+			return a + b
+		},
+		"subtract": func(a int64, b int64) int64 {
+			return a - b
+		},
+		"divide": func(n int64, d int64) int64 {
+			return n / d
+		},
+		"multiply": func(a int64, b int64) int64 {
+			return a * b
+		},
+		"timezone": func() string {
+			t, _ := time.Now().Zone()
+			return t
+		},
+		"percentage": func(a int64, b int64) float64 {
+			return (float64(a) / float64(b)) * 100
+		},
+		"int64": toInt64,
+		"intComma": func(v interface{}) string {
+			return humanize.Comma(toInt64(v))
+		},
+		"int64Comma": func(v int64) string {
+			return humanize.Comma(v)
+		},
+		"ticketWindowProgress": func(i int) float64 {
+			p := (float64(i) / float64(exp.ChainParams.StakeDiffWindowSize)) * 100
+			return p
+		},
+		"rewardAdjustmentProgress": func(i int) float64 {
+			p := (float64(i) / float64(exp.ChainParams.SubsidyReductionInterval)) * 100
+			return p
+		},
+		"float64AsDecimalParts": func(v float64, useCommas bool) []string {
+			clipped := fmt.Sprintf("%.8f", v)
+			oldLength := len(clipped)
+			clipped = strings.TrimRight(clipped, "0")
+			trailingZeros := strings.Repeat("0", oldLength-len(clipped))
+			valueChunks := strings.Split(clipped, ".")
+			integer := valueChunks[0]
+			var dec string
+			if len(valueChunks) == 2 {
+				dec = valueChunks[1]
+			} else {
+				dec = ""
+				log.Errorf("float64AsDecimalParts has no decimal value. Input: %v", v)
+			}
+			if useCommas {
+				integerAsInt64, err := strconv.ParseInt(integer, 10, 64)
+				if err != nil {
+					log.Errorf("float64AsDecimalParts comma formatting failed. Input: %v Error: %v", v, err.Error())
+					integer = "ERROR"
+					dec = "VALUE"
+					zeros := ""
+					return []string{integer, dec, zeros}
+				}
+				integer = humanize.Comma(integerAsInt64)
+			}
+			return []string{integer, dec, trailingZeros}
+		},
+		"amountAsDecimalParts": func(v int64, useCommas bool) []string {
+			amt := strconv.FormatInt(v, 10)
+			if len(amt) <= 8 {
+				dec := strings.TrimRight(amt, "0")
+				trailingZeros := strings.Repeat("0", len(amt)-len(dec))
+				leadingZeros := strings.Repeat("0", 8-len(amt))
+				return []string{"0", leadingZeros + dec, trailingZeros}
+			}
+			integer := amt[:len(amt)-8]
+			if useCommas {
+				integerAsInt64, err := strconv.ParseInt(integer, 10, 64)
+				if err != nil {
+					log.Errorf("amountAsDecimalParts comma formatting failed. Input: %v Error: %v", v, err.Error())
+					integer = "ERROR"
+					dec := "VALUE"
+					zeros := ""
+					return []string{integer, dec, zeros}
+				}
+				integer = humanize.Comma(integerAsInt64)
+			}
+			dec := strings.TrimRight(amt[len(amt)-8:], "0")
+			zeros := strings.Repeat("0", 8-len(dec))
+			return []string{integer, dec, zeros}
+		},
+		"remaining": func(idx int, max int64, t int64) string {
+			x := (max - int64(idx)) * t
+			allsecs := int(time.Duration(x).Seconds())
+			str := ""
+			if allsecs > 604799 {
+				weeks := allsecs / 604800
+				allsecs %= 604800
+				str += fmt.Sprintf("%dw ", weeks)
+			}
+			if allsecs > 86399 {
+				days := allsecs / 86400
+				allsecs %= 86400
+				str += fmt.Sprintf("%dd ", days)
+			}
+			if allsecs > 3599 {
+				hours := allsecs / 3600
+				allsecs %= 3600
+				str += fmt.Sprintf("%dh ", hours)
+			}
+			if allsecs > 59 {
+				mins := allsecs / 60
+				allsecs %= 60
+				str += fmt.Sprintf("%dm ", mins)
+			}
+			if allsecs > 0 {
+				str += fmt.Sprintf("%ds ", allsecs)
+			}
+			return str + "remaining"
+		},
 	}
+
+	exp.templates = make([]*template.Template, 0, 4)
+
+	homeTemplate, err := template.New("home").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["home"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		log.Errorf("Unable to create new html template: %v", err)
+	}
+	exp.templates = append(exp.templates, homeTemplate)
+
+	explorerTemplate, err := template.New("explorer").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["explorer"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		log.Errorf("Unable to create new html template: %v", err)
+	}
+	exp.templates = append(exp.templates, explorerTemplate)
+
+	blockTemplate, err := template.New("block").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["block"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		log.Errorf("Unable to create new html template: %v", err)
+	}
+	exp.templates = append(exp.templates, blockTemplate)
+
+	txTemplate, err := template.New("tx").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["tx"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		log.Errorf("Unable to create new html template: %v", err)
+	}
+	exp.templates = append(exp.templates, txTemplate)
+
+	addrTemplate, err := template.New("address").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["address"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		log.Errorf("Unable to create new html template: %v", err)
+	}
+	exp.templates = append(exp.templates, addrTemplate)
+
+	decodeTxTemplate, err := template.New("rawtx").Funcs(exp.templateHelpers).ParseFiles(
+		exp.templateFiles["rawtx"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		log.Errorf("Unable to create new html template: %v", err)
+	}
+	exp.templates = append(exp.templates, decodeTxTemplate)
+
+	errorTemplate, err := template.New("error").ParseFiles(
+		exp.templateFiles["error"],
+		exp.templateFiles["extras"],
+	)
+	if err != nil {
+		log.Errorf("Unable to create new html template: %v", err)
+	}
+	exp.templates = append(exp.templates, errorTemplate)
 
 	exp.addRoutes()
 
 	exp.wsHub = NewWebsocketHub()
-
 	go exp.wsHub.run()
 
 	return exp
 }
 
-// prePopulateChartsData should run in the background the first time the system
-// is initialized and when new blocks are added.
-func (exp *explorerUI) prePopulateChartsData() {
-	if exp.liteMode {
-		log.Warnf("Charts are not supported in lite mode!")
-		return
-	}
-	log.Info("Pre-populating the charts data. This may take a minute...")
-	var err error
-
-	pgData, err := exp.explorerSource.GetPgChartsData()
-	if err != nil {
-		log.Errorf("Invalid PG data found: %v", err)
-		return
-	}
-
-	sqliteData, err := exp.blockData.GetSqliteChartsData()
-	if err != nil {
-		log.Errorf("Invalid SQLite data found: %v", err)
-		return
-	}
-
-	for k, v := range sqliteData {
-		pgData[k] = v
-	}
-
-	cacheChartsData.Lock()
-	cacheChartsData.Data = pgData
-	cacheChartsData.Unlock()
-
-	log.Info("Done Pre-populating the charts data")
-}
-
-func (exp *explorerUI) Store(blockData *blockdata.BlockData, msgBlock *wire.MsgBlock) error {
+func (exp *explorerUI) Store(blockData *blockdata.BlockData, _ *wire.MsgBlock) error {
 	exp.NewBlockDataMtx.Lock()
 	bData := blockData.ToBlockExplorerSummary()
-
-	// Update the charts data after every five blocks or if no charts data
-	// exists yet.
-	if !exp.liteMode && bData.Height%5 == 0 || len(cacheChartsData.Data) == 0 {
-		go exp.prePopulateChartsData()
-	}
-
 	newBlockData := &BlockBasic{
 		Height:         int64(bData.Height),
 		Voters:         bData.Voters,
@@ -304,90 +458,75 @@ func (exp *explorerUI) Store(blockData *blockdata.BlockData, msgBlock *wire.MsgB
 		return (a / b) * 100
 	}
 
-	stakePerc := blockData.PoolInfo.Value / lddlutil.Amount(blockData.ExtraInfo.CoinSupply).ToCoin()
+	exp.ExtraInfo = &HomeInfo{
+		CoinSupply:        blockData.ExtraInfo.CoinSupply,
+		StakeDiff:         blockData.CurrentStakeDiff.CurrentStakeDifficulty,
+		IdxBlockInWindow:  blockData.IdxBlockInWindow,
+		IdxInRewardWindow: int(newBlockData.Height % exp.ChainParams.SubsidyReductionInterval),
+		DevAddress:        exp.ExtraInfo.DevAddress,
+		Difficulty:        blockData.Header.Difficulty,
+		NBlockSubsidy: BlockSubsidy{
+			Dev:   blockData.ExtraInfo.NextBlockSubsidy.Developer,
+			PoS:   blockData.ExtraInfo.NextBlockSubsidy.PoS,
+			PoW:   blockData.ExtraInfo.NextBlockSubsidy.PoW,
+			Total: blockData.ExtraInfo.NextBlockSubsidy.Total,
+		},
+		Params: ChainParams{
+			WindowSize:       exp.ChainParams.StakeDiffWindowSize,
+			RewardWindowSize: exp.ChainParams.SubsidyReductionInterval,
+			BlockTime:        exp.ChainParams.TargetTimePerBlock.Nanoseconds(),
+		},
+		PoolInfo: TicketPoolInfo{
+			Size:       blockData.PoolInfo.Size,
+			Value:      blockData.PoolInfo.Value,
+			ValAvg:     blockData.PoolInfo.ValAvg,
+			Percentage: percentage(blockData.PoolInfo.Value, lddlutil.Amount(blockData.ExtraInfo.CoinSupply).ToCoin()),
+			Target:     exp.ChainParams.TicketPoolSize * exp.ChainParams.TicketsPerBlock,
+			PercentTarget: func() float64 {
+				target := float64(exp.ChainParams.TicketPoolSize * exp.ChainParams.TicketsPerBlock)
+				return float64(blockData.PoolInfo.Size) / target * 100
+			}(),
+		},
+		TicketROI: percentage(lddlutil.Amount(blockData.ExtraInfo.NextBlockSubsidy.PoS).ToCoin()/5, blockData.CurrentStakeDiff.CurrentStakeDifficulty),
+		ROIPeriod: fmt.Sprintf("%.2f days", exp.ChainParams.TargetTimePerBlock.Seconds()*float64(exp.ChainParams.TicketPoolSize)/86400),
+	}
 
-	// Update all ExtraInfo with latest data
-	exp.ExtraInfo.CoinSupply = blockData.ExtraInfo.CoinSupply
-	exp.ExtraInfo.StakeDiff = blockData.CurrentStakeDiff.CurrentStakeDifficulty
-	exp.ExtraInfo.IdxBlockInWindow = blockData.IdxBlockInWindow
-	exp.ExtraInfo.IdxInRewardWindow = int(newBlockData.Height % exp.ChainParams.SubsidyReductionInterval)
-	exp.ExtraInfo.Difficulty = blockData.Header.Difficulty
-	exp.ExtraInfo.NBlockSubsidy.Dev = blockData.ExtraInfo.NextBlockSubsidy.Developer
-	exp.ExtraInfo.NBlockSubsidy.PoS = blockData.ExtraInfo.NextBlockSubsidy.PoS
-	exp.ExtraInfo.NBlockSubsidy.PoW = blockData.ExtraInfo.NextBlockSubsidy.PoW
-	exp.ExtraInfo.NBlockSubsidy.Total = blockData.ExtraInfo.NextBlockSubsidy.Total
-	exp.ExtraInfo.PoolInfo.Size = blockData.PoolInfo.Size
-	exp.ExtraInfo.PoolInfo.Value = blockData.PoolInfo.Value
-	exp.ExtraInfo.PoolInfo.ValAvg = blockData.PoolInfo.ValAvg
-	exp.ExtraInfo.PoolInfo.Percentage = stakePerc * 100
-
-	exp.ExtraInfo.PoolInfo.PercentTarget = func() float64 {
-		target := float64(exp.ChainParams.TicketPoolSize * exp.ChainParams.TicketsPerBlock)
-		return float64(blockData.PoolInfo.Size) / target * 100
-	}()
-
-	exp.ExtraInfo.TicketReward = func() float64 {
-		PosSubPerVote := lddlutil.Amount(blockData.ExtraInfo.NextBlockSubsidy.PoS).ToCoin() / float64(exp.ChainParams.TicketsPerBlock)
-		return percentage(PosSubPerVote, blockData.CurrentStakeDiff.CurrentStakeDifficulty)
-	}()
-
-	// The actual Reward of a ticket needs to also take into consideration the
-	// ticket maturity (time from ticket purchase until its eligible to vote)
-	// and coinbase maturity (time after vote until funds distributed to ticket
-	// holder are available to use).
-	exp.ExtraInfo.RewardPeriod = func() string {
-		PosAvgTotalBlocks := float64(
-			exp.ExtraInfo.Params.MeanVotingBlocks +
-				int64(exp.ChainParams.TicketMaturity) +
-				int64(exp.ChainParams.CoinbaseMaturity))
-		return fmt.Sprintf("%.2f days", exp.ChainParams.TargetTimePerBlock.Seconds()*PosAvgTotalBlocks/86400)
-	}()
-
-	asr, _ := exp.simulateASR(1000, false, stakePerc,
-		lddlutil.Amount(blockData.ExtraInfo.CoinSupply).ToCoin(),
-		float64(exp.NewBlockData.Height),
-		blockData.CurrentStakeDiff.CurrentStakeDifficulty)
-
-	exp.ExtraInfo.ASR = asr
-
-	exp.NewBlockDataMtx.Unlock()
-
-	if !exp.liteMode && exp.devPrefetch {
+	if !exp.liteMode {
+		exp.ExtraInfo.DevFund = 0
 		go exp.updateDevFundBalance()
 	}
 
-	// Signal to the websocket hub that a new block was received, but do not
-	// block Store(), and do not hang forever in a goroutine waiting to send.
-	go func() {
-		select {
-		case exp.wsHub.HubRelay <- sigNewBlock:
-		case <-time.After(time.Second * 10):
-			log.Errorf("sigNewBlock send failed: Timeout waiting for WebsocketHub.")
-		}
-	}()
+	exp.NewBlockDataMtx.Unlock()
 
-	log.Debugf("Got new block %d for the explorer.", newBlockData.Height)
+	exp.wsHub.HubRelay <- sigNewBlock
+
+	log.Debugf("Got new block %d", newBlockData.Height)
 
 	return nil
 }
 
 func (exp *explorerUI) updateDevFundBalance() {
-	if exp.liteMode {
-		log.Warnf("Full balances not supported in lite mode.")
-		return
-	}
-
 	// yield processor to other goroutines
 	runtime.Gosched()
 	exp.NewBlockDataMtx.Lock()
 	defer exp.NewBlockDataMtx.Unlock()
 
-	devBalance, err := exp.explorerSource.DevBalance()
+	_, devBalance, err := exp.explorerSource.AddressHistory(exp.ExtraInfo.DevAddress, 1, 0)
 	if err == nil && devBalance != nil {
 		exp.ExtraInfo.DevFund = devBalance.TotalUnspent
 	} else {
-		log.Errorf("explorerUI.updateDevFundBalance failed: %v", err)
+		log.Warnf("explorerUI.updateDevFundBalance failed: %v", err)
 	}
+}
+
+func (exp *explorerUI) StoreMPData(data *mempool.MempoolData, timestamp time.Time) error {
+	exp.MempoolData.RLock()
+	exp.MempoolData.NumTickets = data.NumTickets
+	exp.MempoolData.NumVotes = data.NumVotes
+	exp.MempoolData.RUnlock()
+	exp.wsHub.HubRelay <- sigMempoolUpdate
+
+	return nil
 }
 
 func (exp *explorerUI) addRoutes() {
@@ -414,117 +553,4 @@ func (exp *explorerUI) addRoutes() {
 	exp.Mux.Get("/address/{x}", redirect("address"))
 
 	exp.Mux.Get("/decodetx", redirect("decodetx"))
-}
-
-// Simulate ticket purchase and re-investment over a full year for a given
-// starting amount of LDDL and calculation parameters.  Generate a TEXT table of
-// the simulation results that can optionally be used for future expansion of
-// lddldata functionality.
-func (exp *explorerUI) simulateASR(StartingLDDLBalance float64, IntegerTicketQty bool,
-	CurrentStakePercent float64, ActualCoinbase float64, CurrentBlockNum float64,
-	ActualTicketPrice float64) (ASR float64, ReturnTable string) {
-
-	// Calculations are only useful on mainnet.  Short circuit calculations if
-	// on any other version of chain params.
-	if exp.ChainParams.Name != "mainnet" {
-		return 0, ""
-	}
-
-	BlocksPerDay := 86400 / exp.ChainParams.TargetTimePerBlock.Seconds()
-	BlocksPerYear := 365 * BlocksPerDay
-	TicketsPurchased := float64(0)
-
-	StakeRewardAtBlock := func(blocknum float64) float64 {
-		// Option 1:  RPC Call
-		Subsidy := exp.blockData.BlockSubsidy(int64(blocknum), 1)
-		return lddlutil.Amount(Subsidy.PoS).ToCoin()
-
-		// Option 2:  Calculation
-		// epoch := math.Floor(blocknum / float64(exp.ChainParams.SubsidyReductionInterval))
-		// RewardProportionPerVote := float64(exp.ChainParams.StakeRewardProportion) / (10 * float64(exp.ChainParams.TicketsPerBlock))
-		// return float64(RewardProportionPerVote) * lddlutil.Amount(exp.ChainParams.BaseSubsidy).ToCoin() *
-		// 	math.Pow(float64(exp.ChainParams.MulSubsidy)/float64(exp.ChainParams.DivSubsidy), epoch)
-	}
-
-	MaxCoinSupplyAtBlock := func(blocknum float64) float64 {
-		// 4th order poly best fit curve to Legenddigital mainnet emissions plot.
-		// Curve fit was done with 0 Y intercept and Pre-Mine added after.
-
-		return (-9E-19*math.Pow(blocknum, 4) +
-			7E-12*math.Pow(blocknum, 3) -
-			2E-05*math.Pow(blocknum, 2) +
-			29.757*blocknum + 76963 +
-			1680000) // Premine 1.68M
-
-	}
-
-	CoinAdjustmentFactor := ActualCoinbase / MaxCoinSupplyAtBlock(CurrentBlockNum)
-
-	TheoreticalTicketPrice := func(blocknum float64) float64 {
-		ProjectedCoinsCirculating := MaxCoinSupplyAtBlock(blocknum) * CoinAdjustmentFactor * CurrentStakePercent
-		TicketPoolSize := (float64(exp.ExtraInfo.Params.MeanVotingBlocks) + float64(exp.ChainParams.TicketMaturity) +
-			float64(exp.ChainParams.CoinbaseMaturity)) * float64(exp.ChainParams.TicketsPerBlock)
-		return ProjectedCoinsCirculating / TicketPoolSize
-
-	}
-	TicketAdjustmentFactor := ActualTicketPrice / TheoreticalTicketPrice(CurrentBlockNum)
-
-	// Prepare for simulation
-	simblock := CurrentBlockNum
-	TicketPrice := ActualTicketPrice
-	LDDLBalance := StartingLDDLBalance
-
-	ReturnTable += fmt.Sprintf("\n\nBLOCKNUM        LDDL  TICKETS TKT_PRICE TKT_REWRD  ACTION\n")
-	ReturnTable += fmt.Sprintf("%8d  %9.2f %8.1f %9.2f %9.2f    INIT\n",
-		int64(simblock), LDDLBalance, TicketsPurchased,
-		TicketPrice, StakeRewardAtBlock(simblock))
-
-	for simblock < (BlocksPerYear + CurrentBlockNum) {
-
-		// Simulate a Purchase on simblock
-		TicketPrice = TheoreticalTicketPrice(simblock) * TicketAdjustmentFactor
-
-		if IntegerTicketQty {
-			// Use this to simulate integer qtys of tickets up to max funds
-			TicketsPurchased = math.Floor(LDDLBalance / TicketPrice)
-		} else {
-			// Use this to simulate ALL funds used to buy tickets - even fractional tickets
-			// which is actually not possible
-			TicketsPurchased = (LDDLBalance / TicketPrice)
-		}
-
-		LDDLBalance -= (TicketPrice * TicketsPurchased)
-		ReturnTable += fmt.Sprintf("%8d  %9.2f %8.1f %9.2f %9.2f     BUY\n",
-			int64(simblock), LDDLBalance, TicketsPurchased,
-			TicketPrice, StakeRewardAtBlock(simblock))
-
-		// Move forward to average vote
-		simblock += (float64(exp.ChainParams.TicketMaturity) + float64(exp.ExtraInfo.Params.MeanVotingBlocks))
-		ReturnTable += fmt.Sprintf("%8d  %9.2f %8.1f %9.2f %9.2f    VOTE\n",
-			int64(simblock), LDDLBalance, TicketsPurchased,
-			(TheoreticalTicketPrice(simblock) * TicketAdjustmentFactor), StakeRewardAtBlock(simblock))
-
-		// Simulate return of funds
-		LDDLBalance += (TicketPrice * TicketsPurchased)
-
-		// Simulate reward
-		LDDLBalance += (StakeRewardAtBlock(simblock) * TicketsPurchased)
-		TicketsPurchased = 0
-
-		// Move forward to coinbase maturity
-		simblock += float64(exp.ChainParams.CoinbaseMaturity)
-
-		ReturnTable += fmt.Sprintf("%8d  %9.2f %8.1f %9.2f %9.2f  REWARD\n",
-			int64(simblock), LDDLBalance, TicketsPurchased,
-			(TheoreticalTicketPrice(simblock) * TicketAdjustmentFactor), StakeRewardAtBlock(simblock))
-
-		// Need to receive funds before we can use them again so add 1 block
-		simblock++
-	}
-
-	// Scale down to exactly 365 days
-	SimulationReward := ((LDDLBalance - StartingLDDLBalance) / StartingLDDLBalance) * 100
-	ASR = (BlocksPerYear / (simblock - CurrentBlockNum)) * SimulationReward
-	ReturnTable += fmt.Sprintf("ASR over 365 Days is %.2f.\n", ASR)
-	return
 }

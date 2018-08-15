@@ -4,7 +4,9 @@
 package explorer
 
 import (
+	"bytes"
 	"context"
+	"html/template"
 	"net/http"
 	"strconv"
 
@@ -19,7 +21,6 @@ const (
 	ctxBlockHash
 	ctxTxHash
 	ctxAddress
-	ctxAgendaId
 )
 
 func (exp *explorerUI) BlockHashPathOrIndexCtx(next http.Handler) http.Handler {
@@ -31,14 +32,14 @@ func (exp *explorerUI) BlockHashPathOrIndexCtx(next http.Handler) http.Handler {
 			height, err = exp.blockData.GetBlockHeight(hash)
 			if err != nil {
 				log.Errorf("GetBlockHeight(%s) failed: %v", hash, err)
-				exp.StatusPage(w, defaultErrorCode, "could not find that block", NotFoundStatusType)
+				exp.ErrorPage(w, "Something went wrong...", "could not find that block", true)
 				return
 			}
 		} else {
 			hash, err = exp.blockData.GetBlockHash(height)
 			if err != nil {
 				log.Errorf("GetBlockHeight(%d) failed: %v", height, err)
-				exp.StatusPage(w, defaultErrorCode, "could not find that block", NotFoundStatusType)
+				exp.ErrorPage(w, "Something went wrong...", "could not find that block", true)
 				return
 			}
 		}
@@ -77,15 +78,6 @@ func getTxIDCtx(r *http.Request) string {
 	return hash
 }
 
-func getAgendaIDCtx(r *http.Request) string {
-	hash, ok := r.Context().Value(ctxAgendaId).(string)
-	if !ok {
-		log.Trace("Agendaid not set")
-		return ""
-	}
-	return hash
-}
-
 // TransactionHashCtx embeds "txid" into the request context
 func TransactionHashCtx(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -95,20 +87,22 @@ func TransactionHashCtx(next http.Handler) http.Handler {
 	})
 }
 
+// templateExecToString executes the input template with given name using the
+// supplied data, and writes the result into a string. If the template fails to
+// execute, a non-nil error will be returned. Check it before writing to the
+// client, otherwise you might as well execute directly into your response
+// writer instead of the internal buffer of this function.
+func templateExecToString(t *template.Template, name string, data interface{}) (string, error) {
+	var page bytes.Buffer
+	err := t.ExecuteTemplate(&page, name, data)
+	return page.String(), err
+}
+
 // AddressPathCtx embeds "address" into the request context
 func AddressPathCtx(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		address := chi.URLParam(r, "address")
 		ctx := context.WithValue(r.Context(), ctxAddress, address)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-// AgendaPathCtx embeds "agendaid" into the request context
-func AgendaPathCtx(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		agendaid := chi.URLParam(r, "agendaid")
-		ctx := context.WithValue(r.Context(), ctxAgendaId, agendaid)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

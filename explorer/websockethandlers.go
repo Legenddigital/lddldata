@@ -1,5 +1,3 @@
-// Copyright (c) 2018, The Decred developers
-// Copyright (c) 2018, The Legenddigital developers
 // Copyright (c) 2017, The lddldata developers
 // See LICENSE for details.
 
@@ -11,50 +9,45 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"golang.org/x/net/websocket"
 )
 
-var ErrWsClosed = "use of closed network connection"
-
 // RootWebsocket is the websocket handler for all pages
 func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 	wsHandler := websocket.Handler(func(ws *websocket.Conn) {
 		// Create channel to signal updated data availability
-		updateSig := make(hubSpoke, 3)
+		updateSig := make(hubSpoke)
 		// register websocket client with our signal channel
-		clientData := exp.wsHub.RegisterClient(&updateSig)
+		exp.wsHub.RegisterClient(&updateSig)
 		// unregister (and close signal channel) before return
 		defer exp.wsHub.UnregisterClient(&updateSig)
-
-		// close the websocket
-		closeWS := func() {
-			err := ws.Close()
-			// Do not log error if connection is just closed
-			if err != nil && !strings.Contains(err.Error(), ErrWsClosed) {
-				log.Errorf("Failed to close websocket: %v", err)
-			}
-		}
-		defer closeWS()
 
 		requestLimit := 1 << 20
 		// set the max payload size to 1 MB
 		ws.MaxPayloadBytes = requestLimit
 
+		// Ticker for a regular ping
+		ticker := time.NewTicker(pingInterval)
+		defer ticker.Stop()
+
+		// Periodically ping clients over websocket connection
+		go func() {
+			for range ticker.C {
+				exp.wsHub.HubRelay <- sigPingAndUserCount
+			}
+		}()
+
 		// Start listening for websocket messages from client with raw
 		// transaction bytes (hex encoded) to decode or broadcast.
 		go func() {
-			defer closeWS()
 			for {
 				// Wait to receive a message on the websocket
 				msg := &WebSocketMessage{}
 				ws.SetReadDeadline(time.Now().Add(wsReadTimeout))
 				if err := websocket.JSON.Receive(ws, &msg); err != nil {
-					if err.Error() != "EOF" {
-						log.Warnf("websocket client receive error: %v", err)
-					}
+					log.Warnf("websocket client receive error: %v", err)
 					return
 				}
 
@@ -96,19 +89,6 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 					} else {
 						webData.Message = fmt.Sprintf("Transaction sent: %s", txid)
 					}
-				case "getmempooltxs":
-					webData.EventId = msg.EventId + "Resp"
-
-					exp.MempoolData.Lock()
-					msg, err := json.Marshal(exp.MempoolData)
-					exp.MempoolData.Unlock()
-
-					if err != nil {
-						log.Warn("Invalid JSON message: ", err)
-						webData.Message = fmt.Sprintf("Error: Could not encode JSON message")
-						break
-					}
-					webData.Message = string(msg)
 				case "ping":
 					log.Tracef("We've been pinged: %.40s...", msg.Message)
 					continue
@@ -120,11 +100,8 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 				// send the response back on the websocket
 				ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
 				if err := websocket.JSON.Send(ws, webData); err != nil {
-					// Do not log error if connection is just closed
-					if !strings.Contains(err.Error(), ErrWsClosed) {
-						log.Debugf("Failed to encode WebSocketMessage (reply) %s: %v",
-							webData.EventId, err)
-					}
+					log.Debugf("Failed to encode WebSocketMessage %s: %v",
+						webData.EventId, err)
 					// If the send failed, the client is probably gone, so close
 					// the connection and quit.
 					return
@@ -132,7 +109,7 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 			}
 		}()
 
-		// Send loop (ping, new tx, block, etc. update loop)
+		// Ping and block update loop (send only)
 	loop:
 		for {
 			// Wait for signal from the hub to update
@@ -140,9 +117,11 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 			case sig, ok := <-updateSig:
 				// Check if the update channel was closed. Either the websocket
 				// hub will do it after unregistering the client, or forcibly in
-				// response to (http.CloseNotifier).CloseNotify() and only then
-				// if the hub has somehow lost track of the client.
+				// response to (http.CloseNotifier).CloseNotify() and only then if
+				// the hub has somehow lost track of the client.
 				if !ok {
+					//ws.WriteClose(1)
+					exp.wsHub.UnregisterClient(&updateSig)
 					break loop
 				}
 
@@ -153,7 +132,8 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 				log.Tracef("signaling client: %p", &updateSig)
 
 				// Write block data to websocket client
-
+				exp.NewBlockDataMtx.RLock()
+				exp.MempoolData.RLock()
 				webData := WebSocketMessage{
 					EventId: eventIDs[sig],
 				}
@@ -161,34 +141,25 @@ func (exp *explorerUI) RootWebsocket(w http.ResponseWriter, r *http.Request) {
 				enc := json.NewEncoder(buff)
 				switch sig {
 				case sigNewBlock:
-					exp.NewBlockDataMtx.Lock()
 					enc.Encode(WebsocketBlock{
 						Block: exp.NewBlockData,
 						Extra: exp.ExtraInfo,
 					})
-					exp.NewBlockDataMtx.Unlock()
 					webData.Message = buff.String()
 				case sigMempoolUpdate:
-					exp.MempoolData.Lock()
-					enc.Encode(exp.MempoolData.MempoolShort)
-					exp.MempoolData.Unlock()
+					enc.Encode(exp.MempoolData)
 					webData.Message = buff.String()
 				case sigPingAndUserCount:
 					// ping and send user count
 					webData.Message = strconv.Itoa(exp.wsHub.NumClients())
-				case sigNewTx:
-					clientData.RLock()
-					enc.Encode(clientData.newTxs)
-					clientData.RUnlock()
-					webData.Message = buff.String()
 				}
 
 				ws.SetWriteDeadline(time.Now().Add(wsWriteTimeout))
-				if err := websocket.JSON.Send(ws, webData); err != nil {
-					// Do not log error if connection is just closed
-					if !strings.Contains(err.Error(), ErrWsClosed) {
-						log.Debugf("Failed to encode WebSocketMessage (push) %v: %v", sig, err)
-					}
+				err := websocket.JSON.Send(ws, webData)
+				exp.MempoolData.RUnlock()
+				exp.NewBlockDataMtx.RUnlock()
+				if err != nil {
+					log.Debugf("Failed to encode WebSocketMessage %v: %v", sig, err)
 					// If the send failed, the client is probably gone, so close
 					// the connection and quit.
 					return

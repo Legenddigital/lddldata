@@ -9,8 +9,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net"
-	"net/http"
-	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"runtime/pprof"
@@ -21,15 +19,13 @@ import (
 	"github.com/Legenddigital/lddld/rpcclient"
 	"github.com/Legenddigital/lddldata/db/lddlpg"
 	"github.com/Legenddigital/lddldata/rpcutils"
-	"github.com/Legenddigital/lddldata/stakedb"
-	"github.com/Legenddigital/slog"
+	"github.com/btcsuite/btclog"
 )
 
 var (
-	backendLog      *slog.Backend
-	rpcclientLogger slog.Logger
-	pgLogger        slog.Logger
-	stakedbLogger   slog.Logger
+	backendLog      *btclog.Backend
+	rpcclientLogger btclog.Logger
+	sqliteLogger    btclog.Logger
 )
 
 const (
@@ -42,13 +38,11 @@ func init() {
 		fmt.Printf("Unable to start logger: %v", err)
 		os.Exit(1)
 	}
-	backendLog = slog.NewBackend(log.Writer())
+	backendLog = btclog.NewBackend(log.Writer())
 	rpcclientLogger = backendLog.Logger("RPC")
 	rpcclient.UseLogger(rpcclientLogger)
-	pgLogger = backendLog.Logger("PSQL")
-	lddlpg.UseLogger(pgLogger)
-	stakedbLogger = backendLog.Logger("SKDB")
-	stakedb.UseLogger(stakedbLogger)
+	sqliteLogger = backendLog.Logger("DSQL")
+	lddlpg.UseLogger(rpcclientLogger)
 }
 
 func mainCore() error {
@@ -57,12 +51,6 @@ func mainCore() error {
 	if err != nil {
 		fmt.Printf("Failed to load lddldata config: %s\n", err.Error())
 		return err
-	}
-
-	if cfg.HTTPProfile {
-		go func() {
-			log.Infoln(http.ListenAndServe("localhost:6060", nil))
-		}()
 	}
 
 	if cfg.CPUProfile != "" {
@@ -74,21 +62,6 @@ func mainCore() error {
 		}
 		pprof.StartCPUProfile(f)
 		defer pprof.StopCPUProfile()
-	}
-
-	if cfg.MemProfile != "" {
-		var f *os.File
-		f, err = os.Create(cfg.MemProfile)
-		if err != nil {
-			log.Fatal(err)
-			return err
-		}
-		timer := time.NewTimer(time.Second * 15)
-		go func() {
-			<-timer.C
-			pprof.WriteHeapProfile(f)
-			f.Close()
-		}()
 	}
 
 	// Connect to node RPC server
@@ -115,7 +88,6 @@ func mainCore() error {
 		}
 	}
 
-	// Configure PostgreSQL ChainDB
 	dbi := lddlpg.DBInfo{
 		Host:   host,
 		Port:   port,
@@ -123,12 +95,11 @@ func mainCore() error {
 		Pass:   cfg.DBPass,
 		DBName: cfg.DBName,
 	}
-	// Construct a ChainDB without a stakeDB to allow quick dropping of tables.
-	db, err := lddlpg.NewChainDB(&dbi, activeChain, nil, false)
+	db, err := lddlpg.NewChainDB(&dbi, activeChain)
 	if db != nil {
 		defer db.Close()
 	}
-	if err != nil || db == nil {
+	if err != nil {
 		return err
 	}
 
@@ -137,24 +108,8 @@ func mainCore() error {
 		return nil
 	}
 
-	// Create/load stake database (which includes the separate ticket pool DB).
-	stakeDB, _, err := stakedb.NewStakeDatabase(client, activeChain, "rebuild_data")
-	if err != nil {
-		return fmt.Errorf("Unable to create stake DB: %v", err)
-	}
-	defer stakeDB.Close()
-	stakeDBHeight := int64(stakeDB.Height())
-
-	// Provide the stake database to the ChainDB for all of it's ticket tracking
-	// needs.
-	db.UseStakeDB(stakeDB)
-
-	if err = db.VersionCheck(client); err != nil {
-		log.Warnf("ATTENTION: %v", err)
-	}
-
-	if cfg.DuplicateEntryRecovery {
-		return db.DeleteDuplicatesRecovery()
+	if err = db.SetupTables(); err != nil {
+		return err
 	}
 
 	// Ctrl-C to shut down.
@@ -163,19 +118,6 @@ func mainCore() error {
 	// Only accept a single CTRL+C
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt)
-
-	// Check current height of DB
-	bestHeight, err := db.HeightDB()
-	lastBlock := int64(bestHeight)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			lastBlock = -1
-			log.Info("blocks table is empty, starting fresh.")
-		} else {
-			log.Errorln("RetrieveBestBlockHeight:", err)
-			return err
-		}
-	}
 
 	// Start waiting for the interrupt signal
 	go func() {
@@ -186,60 +128,18 @@ func mainCore() error {
 		close(quit)
 	}()
 
-	// Get stakedb at PG DB height
-	var rewindTo int64
-	if lastBlock > 0 {
-		// Rewind one extra block to ensure previous winning tickets (validators
-		// for current block) get stored in the cache by advancing one block.
-		rewindTo = lastBlock - 1
-	}
-	if stakeDBHeight > rewindTo {
-		log.Infof("Rewinding stake db from %d to %d...", stakeDBHeight, rewindTo)
-	}
-	for stakeDBHeight > rewindTo {
-		// check for quit signal
-		select {
-		case <-quit:
-			log.Infof("Rewind cancelled at height %d.", stakeDBHeight)
-			return nil
-		default:
-		}
-		if err = stakeDB.DisconnectBlock(false); err != nil {
-			return err
-		}
-		stakeDBHeight = int64(stakeDB.Height())
+	// Get chain servers's best block
+	_, height, err := client.GetBestBlock()
+	if err != nil {
+		return fmt.Errorf("GetBestBlock failed: %v", err)
 	}
 
-	// Advance to last block, but don't log if it's just one block to connect
-	if stakeDBHeight+1 < lastBlock {
-		log.Infof("Advancing stake db from %d to %d...", stakeDBHeight, lastBlock)
-	}
-	for stakeDBHeight < lastBlock {
-		// check for quit signal
-		select {
-		case <-quit:
-			log.Infof("Rescan cancelled at height %d.", stakeDBHeight)
-			return nil
-		default:
-		}
-
-		block, blockHash, err := rpcutils.GetBlock(stakeDBHeight+1, client)
-		if err != nil {
-			return fmt.Errorf("GetBlock failed (%s): %v", blockHash, err)
-		}
-
-		if err = stakeDB.ConnectBlock(block); err != nil {
-			return err
-		}
-		stakeDBHeight = int64(stakeDB.Height())
-		if stakeDBHeight%1000 == 0 {
-			log.Infof("Stake DB at height %d.", stakeDBHeight)
-		}
-	}
-
-	// Note that we are doing a batch blockchain sync
-	db.InBatchSync = true
-	defer func() { db.InBatchSync = false }()
+	// genesisHash, err := client.GetBlockHash(0)
+	// if err != nil {
+	// 	log.Error("GetBlockHash failed: ", err)
+	// 	return err
+	// }
+	//prev_hash := genesisHash.String()
 
 	var totalTxs, totalVins, totalVouts int64
 	var lastTxs, lastVins, lastVouts int64
@@ -260,10 +160,16 @@ func mainCore() error {
 	speedReport := func() { o.Do(speedReporter) }
 	defer speedReport()
 
-	// Get chain servers's best block
-	_, height, err := client.GetBestBlock()
+	bestHeight, err := db.HeightDB()
+	lastBlock := int64(bestHeight)
 	if err != nil {
-		return fmt.Errorf("GetBestBlock failed: %v", err)
+		if err == sql.ErrNoRows {
+			lastBlock = -1
+			log.Info("blocks table is empty, starting fresh.")
+		} else {
+			log.Errorln("RetrieveBestBlockHeight:", err)
+			return err
+		}
 	}
 
 	// Remove indexes/constraints before bulk import
@@ -319,27 +225,8 @@ func mainCore() error {
 			return fmt.Errorf("GetBlock failed (%s): %v", blockHash, err)
 		}
 
-		// stake db always has genesis, so do not connect it
-		var winners []string
-		if ib > 0 {
-			if err = stakeDB.ConnectBlock(block); err != nil {
-				return fmt.Errorf("stakedb.ConnectBlock failed: %v", err)
-			}
-
-			tpi, found := stakeDB.PoolInfo(*blockHash)
-			if !found {
-				return fmt.Errorf("stakedb.PoolInfo failed to return info for: %v", blockHash)
-			}
-
-			winners = tpi.Winners
-			// Last winners (validators) are in msgBlock.Header.PrevBlock, but
-			// StoreBlock gets them from the stakedb.
-		}
-
 		var numVins, numVouts int64
-		isValid, isMainchain := true, true
-		numVins, numVouts, err = db.StoreBlock(block.MsgBlock(), winners,
-			isValid, isMainchain, cfg.AddrSpendInfoOnline, !cfg.TicketSpendInfoBatch)
+		numVins, numVouts, err = db.StoreBlock(block.MsgBlock(), true, !cfg.UpdateAddrSpendInfo)
 		if err != nil {
 			return fmt.Errorf("StoreBlock failed: %v", err)
 		}
@@ -361,52 +248,25 @@ func mainCore() error {
 	speedReport()
 
 	if reindexing || cfg.ForceReindex {
-		if err = db.DeleteDuplicates(); err != nil {
-			return err
-		}
-
-		// Create indexes
 		if err = db.IndexAll(); err != nil {
 			return fmt.Errorf("IndexAll failed: %v", err)
 		}
-		// Only reindex address table here if we do not do it below
-		if cfg.AddrSpendInfoOnline {
+		if !cfg.UpdateAddrSpendInfo {
 			err = db.IndexAddressTable()
-		}
-		if !cfg.TicketSpendInfoBatch {
-			err = db.IndexTicketsTable()
 		}
 	}
 
-	if !cfg.AddrSpendInfoOnline {
-		// Remove indexes not on funding txns (remove on address table indexes)
+	if cfg.UpdateAddrSpendInfo {
+		// Remove existing indexes not on funding txns
 		_ = db.DeindexAddressTable() // ignore errors for non-existent indexes
-		db.EnableDuplicateCheckOnInsert(false)
 		log.Infof("Populating spending tx info in address table...")
 		numAddresses, err := db.UpdateSpendingInfoInAllAddresses()
 		if err != nil {
 			log.Errorf("UpdateSpendingInfoInAllAddresses FAILED: %v", err)
 		}
-		// Index address table
 		log.Infof("Updated %d rows of address table", numAddresses)
 		if err = db.IndexAddressTable(); err != nil {
 			log.Errorf("IndexAddressTable FAILED: %v", err)
-		}
-	}
-
-	if cfg.TicketSpendInfoBatch {
-		// Remove indexes not on funding txns (remove on address table indexes)
-		_ = db.DeindexTicketsTable() // ignore errors for non-existent indexes
-		db.EnableDuplicateCheckOnInsert(false)
-		log.Infof("Populating spending tx info in tickets table...")
-		numTicketsUpdated, err := db.UpdateSpendingInfoInAllTickets()
-		if err != nil {
-			log.Errorf("UpdateSpendingInfoInAllTickets FAILED: %v", err)
-		}
-		// Index tickets table
-		log.Infof("Updated %d rows of address table", numTicketsUpdated)
-		if err = db.IndexTicketsTable(); err != nil {
-			log.Errorf("IndexTicketsTable FAILED: %v", err)
 		}
 	}
 

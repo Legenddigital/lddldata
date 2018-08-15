@@ -7,10 +7,10 @@ import (
 	"regexp"
 	"strings"
 
+	flags "github.com/btcsuite/go-flags"
 	"github.com/Legenddigital/lddld/chaincfg"
 	"github.com/Legenddigital/lddld/lddlutil"
 	"github.com/Legenddigital/lddlwallet/netparams"
-	flags "github.com/btcsuite/go-flags"
 )
 
 const (
@@ -58,10 +58,10 @@ type config struct {
 	DBTable    string `long:"dbtable" description:"DB table name"`
 
 	// RPC client options
-	LddldUser        string `long:"lddlduser" description:"Daemon RPC user name"`
-	LddldPass        string `long:"lddldpass" description:"Daemon RPC password"`
-	LddldServ        string `long:"lddldserv" description:"Hostname/IP and port of lddld RPC server to connect to (default localhost:9109, testnet: localhost:19109, simnet: localhost:19556)"`
-	LddldCert        string `long:"lddldcert" description:"File containing the lddld certificate file"`
+	LddldUser         string `long:"lddlduser" description:"Daemon RPC user name"`
+	LddldPass         string `long:"lddldpass" description:"Daemon RPC password"`
+	LddldServ         string `long:"lddldserv" description:"Hostname/IP and port of lddld RPC server to connect to (default localhost:9109, testnet: localhost:19109, simnet: localhost:19556)"`
+	LddldCert         string `long:"lddldcert" description:"File containing the lddld certificate file"`
 	DisableDaemonTLS bool   `long:"nodaemontls" description:"Disable TLS for the daemon RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost"`
 
 	// TODO
@@ -80,7 +80,7 @@ var (
 		DBUser:     defaultDBUser,
 		DBPass:     defaultDBPass,
 		DBTable:    defaultDBTableName,
-		LddldCert:  defaultDaemonRPCCertFile,
+		LddldCert:   defaultDaemonRPCCertFile,
 	}
 )
 
@@ -179,8 +179,8 @@ func loadConfig() (*config, error) {
 	activeNet = &netparams.MainNetParams
 	activeChain = &chaincfg.MainNetParams
 	if cfg.TestNet {
-		activeNet = &netparams.TestNet3Params
-		activeChain = &chaincfg.TestNet3Params
+		activeNet = &netparams.TestNet2Params
+		activeChain = &chaincfg.TestNet2Params
 		numNets++
 	}
 	if cfg.SimNet {

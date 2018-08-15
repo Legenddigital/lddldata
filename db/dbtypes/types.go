@@ -5,155 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/Legenddigital/lddldata/db/dbtypes/internal"
 )
-
-// Tickets have 6 states, 5 possible fates:
-// Live -...---> Voted
-//           \-> Missed (unspent) [--> Revoked]
-//            \--...--> Expired (unspent) [--> Revoked]
-
-type TicketSpendType int16
-
-const (
-	TicketUnspent TicketSpendType = iota
-	TicketRevoked
-	TicketVoted
-)
-
-func (p TicketSpendType) String() string {
-	switch p {
-	case TicketUnspent:
-		return "unspent"
-	case TicketRevoked:
-		return "revoked"
-	case TicketVoted:
-		return "Voted"
-	default:
-		return "unknown"
-	}
-}
-
-// AddrTxnType enumerates the different transaction types as displayed by the
-// address page.
-type AddrTxnType int
-
-const (
-	AddrTxnAll AddrTxnType = iota
-	AddrTxnCredit
-	AddrTxnDebit
-	AddrMergedTxnDebit
-	AddrTxnUnknown
-)
-
-// AddrTxnTypes is the canonical mapping from AddrTxnType to string.
-var AddrTxnTypes = map[AddrTxnType]string{
-	AddrTxnAll:         "all",
-	AddrTxnCredit:      "credit",
-	AddrTxnDebit:       "debit",
-	AddrMergedTxnDebit: "merged_debit",
-	AddrTxnUnknown:     "unknown",
-}
-
-func (a AddrTxnType) String() string {
-	return AddrTxnTypes[a]
-}
-
-// AddrTxnTypeFromStr attempts to decode a string into an AddrTxnType.
-func AddrTxnTypeFromStr(txnType string) AddrTxnType {
-	txnType = strings.ToLower(txnType)
-	switch txnType {
-	case "all":
-		return AddrTxnAll
-	case "credit":
-		fallthrough
-	case "credits":
-		return AddrTxnCredit
-	case "debit":
-		fallthrough
-	case "debits":
-		return AddrTxnDebit
-	case "merged_debit", "merged debit":
-		return AddrMergedTxnDebit
-	default:
-		return AddrTxnUnknown
-	}
-
-}
-
-type TicketPoolStatus int16
-
-const (
-	PoolStatusLive TicketPoolStatus = iota
-	PoolStatusVoted
-	PoolStatusExpired
-	PoolStatusMissed
-)
-
-// VoteChoice defines the type of vote choice, and the undelying integer value
-// is stored in the database (do not change these without upgrading the DB!).
-type VoteChoice uint8
-
-const (
-	Yes VoteChoice = iota
-	Abstain
-	No
-	VoteChoiceUnknown
-)
-
-func (p TicketPoolStatus) String() string {
-	switch p {
-	case PoolStatusLive:
-		return "live"
-	case PoolStatusVoted:
-		return "Voted"
-	case PoolStatusExpired:
-		return "expired"
-	case PoolStatusMissed:
-		return "missed"
-	default:
-		return "unknown"
-	}
-}
-
-func (v VoteChoice) String() string {
-	switch v {
-	case Abstain:
-		return "abstain"
-	case Yes:
-		return "yes"
-	case No:
-		return "no"
-	default:
-		return "unknown"
-	}
-}
-
-// ChoiceIndexFromStr converts the vote choice string to a vote choice index.
-func ChoiceIndexFromStr(choice string) (VoteChoice, error) {
-	switch choice {
-	case "abstain":
-		return Abstain, nil
-	case "yes":
-		return Yes, nil
-	case "no":
-		return No, nil
-	default:
-		return VoteChoiceUnknown, fmt.Errorf(`Vote Choice "%s" is unknown`, choice)
-	}
-}
-
-// MileStone defines the various stages passed by vote on a given agenda.
-// Activated is the height at which the delay time begins before a vote activates.
-// HardForked is the height at which the consensus rule changes.
-// LockedIn is the height at which voting on an agenda is consided complete.
-type MileStone struct {
-	Activated  int64
-	HardForked int64
-	LockedIn   int64
-}
 
 // SyncResult is the result of a database sync operation, containing the height
 // of the last block and an arror value.
@@ -300,37 +154,16 @@ type Vout struct {
 // AddressRow represents a row in the addresses table
 type AddressRow struct {
 	// id int64
-	Address        string
-	ValidMainChain bool
-	// MatchingTxHash provides the relationship between spending tx inputs and
-	// funding tx outputs.
-	MatchingTxHash   string
-	IsFunding        bool
-	TxBlockTime      uint64
-	TxHash           string
-	TxVinVoutIndex   uint32
-	Value            uint64
-	VinVoutDbID      uint64
-	MergedDebitCount uint64
-}
-
-// ChartsData defines the fields that store the values needed to plot the charts
-// on the frontend.
-type ChartsData struct {
-	TimeStr    []string  `json:"timestr,omitempty"`
-	Difficulty []float64 `json:"difficulty,omitempty"`
-	Time       []uint64  `json:"time,omitempty"`
-	Value      []uint64  `json:"value,omitempty"`
-	Size       []uint64  `json:"size,omitempty"`
-	ChainSize  []uint64  `json:"chainsize,omitempty"`
-	Count      []uint64  `json:"count,omitempty"`
-	SizeF      []float64 `json:"sizef,omitempty"`
-	ValueF     []float64 `json:"valuef,omitempty"`
-	Unspent    []uint64  `json:"unspent,omitempty"`
-	Revoked    []uint64  `json:"revoked,omitempty"`
-	Height     []uint64  `json:"height,omitempty"`
-	Pooled     []uint64  `json:"pooled,omitempty"`
-	Solo       []uint64  `json:"solo,omitempty"`
+	Address            string
+	FundingTxDbID      uint64
+	FundingTxHash      string
+	FundingTxVoutIndex uint32
+	VoutDbID           uint64
+	Value              uint64
+	SpendingTxDbID     uint64
+	SpendingTxHash     string
+	SpendingTxVinIndex uint32
+	VinDbID            uint64
 }
 
 // ScriptPubKeyData is part of the result of decodescript(ScriptPubKeyHex)
@@ -347,16 +180,13 @@ type VinTxProperty struct {
 	PrevTxIndex uint32 `json:"prevvoutidx"`
 	PrevTxTree  uint16 `json:"tree"`
 	Sequence    uint32 `json:"sequence"`
-	ValueIn     int64  `json:"amountin"`
+	ValueIn     uint64 `json:"amountin"`
 	TxID        string `json:"tx_hash"`
 	TxIndex     uint32 `json:"tx_index"`
 	TxTree      uint16 `json:"tx_tree"`
 	BlockHeight uint32 `json:"blockheight"`
 	BlockIndex  uint32 `json:"blockindex"`
 	ScriptHex   []byte `json:"scripthex"`
-	IsValid     bool   `json:"is_valid"`
-	IsMainchain bool   `json:"is_mainchain"`
-	Time        int64  `json:"time"`
 }
 
 // Vin models a transaction input.
@@ -380,47 +210,32 @@ type ScriptSig struct {
 	Hex string `json:"hex"`
 }
 
-// AgendaVoteChoices contains the vote counts on multiple intervals of time. The
-// interval length may be either a single block, in which case Height contains
-// the block heights, or a day, in which case Time contains the time stamps of
-// each interval. Total is always the sum of Yes, No, and Abstain.
-type AgendaVoteChoices struct {
-	Abstain []uint64 `json:"abstain"`
-	Yes     []uint64 `json:"yes"`
-	No      []uint64 `json:"no"`
-	Total   []uint64 `json:"total"`
-	Height  []uint64 `json:"height,omitempty"`
-	Time    []uint64 `json:"time,omitempty"`
-}
-
 // Tx models a Legenddigital transaction. It is stored in a Block.
 type Tx struct {
 	//blockDbID  int64
-	BlockHash   string `json:"block_hash"`
-	BlockHeight int64  `json:"block_height"`
-	BlockTime   int64  `json:"block_time"`
-	Time        int64  `json:"time"`
-	TxType      int16  `json:"tx_type"`
-	Version     uint16 `json:"version"`
-	Tree        int8   `json:"tree"`
-	TxID        string `json:"txid"`
-	BlockIndex  uint32 `json:"block_index"`
-	Locktime    uint32 `json:"locktime"`
-	Expiry      uint32 `json:"expiry"`
-	Size        uint32 `json:"size"`
-	Spent       int64  `json:"spent"`
-	Sent        int64  `json:"sent"`
-	Fees        int64  `json:"fees"`
-	NumVin      uint32 `json:"numvin"`
-	//Vins        VinTxPropertyARRAY `json:"vins"`
-	VinDbIds  []uint64 `json:"vindbids"`
-	NumVout   uint32   `json:"numvout"`
-	Vouts     []*Vout  `json:"vouts"`
-	VoutDbIds []uint64 `json:"voutdbids"`
+	BlockHash   string             `json:"block_hash"`
+	BlockHeight int64              `json:"block_height"`
+	BlockTime   int64              `json:"block_time"`
+	Time        int64              `json:"time"`
+	TxType      int16              `json:"tx_type"`
+	Version     uint16             `json:"version"`
+	Tree        int8               `json:"tree"`
+	TxID        string             `json:"txid"`
+	BlockIndex  uint32             `json:"block_index"`
+	Locktime    uint32             `json:"locktime"`
+	Expiry      uint32             `json:"expiry"`
+	Size        uint32             `json:"size"`
+	Spent       int64              `json:"spent"`
+	Sent        int64              `json:"sent"`
+	Fees        int64              `json:"fees"`
+	NumVin      uint32             `json:"numvin"`
+	Vins        VinTxPropertyARRAY `json:"vins"`
+	VinDbIds    []uint64           `json:"vindbids"`
+	NumVout     uint32             `json:"numvout"`
+	Vouts       []*Vout            `json:"vouts"`
+	VoutDbIds   []uint64           `json:"voutdbids"`
 	// NOTE: VoutDbIds may not be needed if there is a vout table since each
 	// vout will have a tx_dbid
-	IsValidBlock     bool `json:"valid_block"`
-	IsMainchainBlock bool `json:"mainchain"`
 }
 
 // Block models a Legenddigital block.
@@ -452,14 +267,4 @@ type Block struct {
 	ExtraData    []byte  `json:"extradata"`
 	StakeVersion uint32  `json:"stakeversion"`
 	PreviousHash string  `json:"previousblockhash"`
-}
-
-type BlockDataBasic struct {
-	Height     uint32  `json:"height,omitemtpy"`
-	Size       uint32  `json:"size,omitemtpy"`
-	Hash       string  `json:"hash,omitemtpy"`
-	Difficulty float64 `json:"diff,omitemtpy"`
-	StakeDiff  float64 `json:"sdiff,omitemtpy"`
-	Time       int64   `json:"time,omitemtpy"`
-	NumTx      uint32  `json:"txlength,omitempty"`
 }

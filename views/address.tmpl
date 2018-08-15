@@ -1,15 +1,12 @@
 {{define "address"}}
 <!DOCTYPE html>
 <html lang="en">
-
-{{template "html-head" printf "Legenddigital Address %s" .Data.Address}}
+{{with .Data}}
+{{template "html-head" printf "Legenddigital Address %s" .Address}}
 <body>
-    {{template "navbar" . }}
-    {{with .Data}}
     {{$heights := $.ConfirmHeight}}
-    {{$TxnCount := .TxnCount}}
-    {{$txType := .TxnType}}
-    <div class="container" data-controller="main">
+    {{template "navbar"}}
+    <div class="container">
         <div class="row">
             <div class="col-md-8 col-sm-6">
                 <h4>Address</h4>
@@ -40,7 +37,7 @@
                             {{if ge .KnownTransactions .MaxTxLimit}}
                             <td class="fs28 mono nowrap d-flex align-items-center justify-content-end">unavailable</td>
                             {{else}}
-                            <td class="fs28 mono nowrap fs16-decimal d-flex align-items-center justify-content-end">{{.AmountUnspent.ToCoin}}</td>
+                            <td class="fs28 mono nowrap fs16-decimal d-flex align-items-center justify-content-end">{{.Unspent}}</td>
                             {{end}}
                         {{end}}
                     </tr>
@@ -59,7 +56,7 @@
                             {{if ge .KnownTransactions .MaxTxLimit}}
                             <td class="mono nowrap text-right">unavailable</td>
                             {{else}}
-                            <td class="mono nowrap text-right">{{.AmountReceived.ToCoin}}</td>
+                            <td class="mono nowrap text-right">{{.TotalReceived}}</td>
                             {{end}}
                         {{end}}
                     </tr>
@@ -77,7 +74,7 @@
                             {{if ge .KnownTransactions .MaxTxLimit}}
                             <td class="mono nowrap text-right">unavailable</td>
                             {{else}}
-                            <td class="mono nowrap text-right">{{.AmountSent.ToCoin}}</td>
+                            <td class="mono nowrap text-right">{{.TotalSent}}</td>
                             {{end}}
                         {{end}}
                     </tr>
@@ -96,28 +93,31 @@
         <div class="row">
             <div class="col">
                 <div class="d-flex flex-wrap align-items-center justify-content-end mb-1">
-                    <h5 class="mr-auto mb-0">History</h5>
-                    {{if lt .NumTransactions $TxnCount}}
+                    <h5 class="mr-auto mb-0">Transactions</h5>
+                    {{if lt .NumTransactions .KnownTransactions}}
                     <div div class="d-flex flex-wrap-reverse align-items-center justify-content-end">
-                        <span class="fs12 nowrap text-right">
-                            {{intComma (add .Offset 1)}} &mdash; {{intComma (add .Offset .NumTransactions)}} of {{intComma $TxnCount}} transactions
-                            {{if and (not .Fullmode) (ge .KnownTransactions .MaxTxLimit)}}
+                        {{if .Fullmode}}
+                        <span class="fs12 nowrap text-right"> {{intComma (add .Offset 1)}} &mdash; {{intComma (add .Offset .NumFundingTxns)}} of {{intComma .KnownFundingTxns}} funding transactions
+                        {{else}}
+                        <span class="fs12 nowrap text-right"> {{intComma (add .Offset 1)}} &mdash; {{intComma (add .Offset .NumTransactions)}} of {{intComma .KnownTransactions}} transactions
+                            {{if ge .KnownTransactions .MaxTxLimit}}
                             <sup>*</sup>
                             {{end}}
+                        {{end}}
                         </span>
                         <nav aria-label="address transactions navigation" data-limit="{{.Limit}}" class="ml-2">
                             <ul class="pagination mb-0 pagination-sm">
                                 <li class="page-item {{if eq .Offset 0}}disabled{{end}}">
                                     <a
                                         class="page-link"
-                                        href="{{.Path}}?n={{.Limit}}&start={{if gt (subtract .Offset .Limit) 0}}{{subtract .Offset .Limit}}{{else}}0{{end}}&txntype={{$txType}}"
+                                        href="{{.Path}}?n={{.Limit}}&start={{if gt (subtract .Offset .Limit) 0}}{{subtract .Offset .Limit}}{{else}}0{{end}}"
                                         id="prev"
                                     >Previous</a>
                                 </li>
-                                <li class="page-item {{if lt (subtract $TxnCount .Offset) (add .Limit 1)}}disabled{{end}}">
+                                <li class="page-item {{if lt (subtract .KnownTransactions .Offset) (add .Limit 1)}}disabled{{end}}">
                                     <a
                                         class="page-link"
-                                        href="{{.Path}}?n={{.Limit}}&start={{add .Offset .Limit}}&txntype={{$txType}}"
+                                        href="{{.Path}}?n={{.Limit}}&start={{add .Offset .Limit}}"
                                         id="next">
                                         Next
                                     </a>
@@ -126,24 +126,20 @@
                         </nav>
                     </div>
                     {{else}}
-                    <span class="fs12 nowrap text-right">{{intComma $TxnCount}} transaction{{if gt $TxnCount 1}}s{{end}}</span>
+                    {{if .Fullmode}}
+                    <span class="fs12 nowrap text-right">{{intComma .KnownFundingTxns}} funding transaction{{if gt .KnownFundingTxns 1}}s{{end}}</span>
+                    {{else}}
+                    <span class="fs12 nowrap text-right">{{intComma .KnownTransactions}} transaction{{if gt .KnownTransactions 1}}s{{end}}</span>
+                    {{end}}
                     {{end}}
                 </div>
                 {{if .Transactions}}
                 <table class="table table-mono-cells table-sm striped">
                     <thead>
-                        <th>Input/Output ID</th>
-                        {{if eq $txType "merged_debit"}}
-                            <th># of Input(s)</th>
-                        {{else}}
-                            <th class="text-right">Credit LDDL</th>
-                        {{end}}
-                        {{if eq $txType "merged_debit"}}
-                            <th class="text-center">Debit LDDL</th>
-                        {{else}}
-                            <th>Debit LDDL</th>
-                        {{end}}
-                        <th>Time UTC</th>
+                        <th>Transactions ID</th>
+                        <th class="text-right">Credit LDDL</th>
+                        <th>Debit LDDL</th>
+                        <th>Time</th>
                         <th>Age</th>
                         <th>Confirms</th>
                         <th>Size</th>
@@ -152,43 +148,27 @@
                         {{range $i, $v := .Transactions}}
                         <tr>
                             {{with $v}}
-                            <td><a href="/tx/{{.TxID}}" class="hash" data-keynav-priority>{{.IOID $txType}}</a></td>
-                            {{if eq $txType "merged_debit"}}
-                                <td>{{.MergedTxnCount}}</td>
+                            <td><a href="/tx/{{.TxID}}" class="hash">{{.TxID}}</a></td>
+                            {{if ne .RecievedTotal 0.0}}
+                                <td class="text-right">{{template "decimalParts" (float64AsDecimalParts .RecievedTotal false)}}</td>
                             {{else}}
-                                {{if ne .ReceivedTotal 0.0}}
-                                    <td class="text-right">{{template "decimalParts" (float64AsDecimalParts .ReceivedTotal false)}}</td>
+                                {{if eq .SentTotal 0.0}}
+                                <td class="text-right">sstxcommitment</td>
                                 {{else}}
-                                    {{if eq .SentTotal 0.0}}
-                                    <td class="text-right">sstxcommitment</td>
-                                    {{else}}
-                                        {{if ne .MatchedTx ""}}
-                                        <td class="text-right"><a href="/tx/{{.MatchedTx}}" class="hash">source</a></td>
-                                        {{else}}
-                                        <td>N/A</td>
-                                        {{end}}
-                                    {{end}}
+                                <td></td>
                                 {{end}}
                             {{end}}
                             {{if ne .SentTotal 0.0}}
                                 {{if lt 0.0 .SentTotal}}
-                                   {{if eq $txType "merged_debit"}}
-                                        <td class="text-right"> {{template "decimalParts" (float64AsDecimalParts .SentTotal false)}}</td>
-                                    {{else}}
-                                        <td>{{template "decimalParts" (float64AsDecimalParts .SentTotal false)}}</td>
-                                    {{end}}
+                                    <td>{{template "decimalParts" (float64AsDecimalParts .SentTotal false)}}</td>
                                 {{else}}
                                     <td>N/A</td>
                                 {{end}}
                             {{else}}
-                                {{if ne .MatchedTx ""}}
-                                    <td><a href="/tx/{{.MatchedTx}}" class="hash">spent</a></td>
-                                {{else}}
-                                    <td>unspent</td>
-                                {{end}}
+                                <td></td>
                             {{end}}
                             <td>
-                                {{if eq .Confirmations 0}}
+                                {{if eq .Time 0}}
                                     Unconfirmed
                                 {{else}}
                                     {{.FormattedTime}}
@@ -198,7 +178,7 @@
                             {{if eq .Time 0}}
                                 N/A
                             {{else}}
-                                <span data-target="main.age" data-age="{{.Time}}"></span>
+                                <span data-age="{{.Time}}"></span>
                             {{end}}
                             </td>
                             <td data-confirmation-block-height="{{index $.ConfirmHeight $i}}">{{.Confirmations}}</td>
@@ -218,26 +198,10 @@
                 </table>
                 {{end}}
 
-                <div
-                    id="txntype-wrapper"
-                    class="d-flex align-items-center justify-content-end"
-                >
-                    <label class="mb-0 mr-1" for="txntype">Type</label>
-                    <select
-                        name="txntype"
-                        id="txntype"
-                        class="form-control-sm mb-2 mr-sm-2 mb-sm-0 {{if not .Fullmode}}disabled{{end}}"
-                        {{if not .Fullmode}}disabled="disabled"{{end}}
-                    >
-                        <option {{if eq $txType "all"}}selected{{end}} value="all">All</option>
-                        <option {{if eq $txType "credit"}}selected{{end}} value="credit">Credits</option>
-                        <option {{if eq $txType "debit"}}selected{{end}} value="debit">Debits</option>
-                        <option {{if eq $txType "merged_debit"}}selected{{end}} value="merged_debit">Merged Debits</option>
-                    </select>
-                </div>
-                {{if and (not .Fullmode) (ge .KnownTransactions .MaxTxLimit)}}
+                {{if ge .KnownTransactions .MaxTxLimit}}
+                {{if not .Fullmode}}
                 <div>
-                    *Limit of {{.MaxTxLimit}} transactions shown in lite mode.
+                    *Limit of 1000 transactions shown in lite mode.
                 </div>
                 {{end}}
                 <div
@@ -248,27 +212,29 @@
                     <select
                         name="pagesize"
                         id="pagesize"
-                        class="form-control-sm mb-2 mr-sm-2 mb-sm-0 {{if lt $TxnCount 20}}disabled{{end}}"
-                        {{if lt $TxnCount 20}}disabled="disabled"{{end}}
-                    >
-                    <option {{if eq .Limit $TxnCount}}selected{{end}} value="{{len .Transactions}}">{{len .Transactions}}</option>
+                        class="form-control-sm mb-2 mr-sm-2 mb-sm-0">
+                        <option {{if eq .Limit 10}}selected{{end}} value="20">20</option>
+                        <option {{if eq .Limit 100}}selected{{end}} value="100">100</option>
+                        <option {{if eq .Limit 1000}}selected{{end}} value="1000">1000</option>
                     </select>
                 </div>
+                {{end}}
+
             </div>
         </div>
     </div>
 
     <script>
-        $(".jsonly").show()
-        
-        $("#txntype").change(function(ev) {
+        {{if lt .NumFundingTxns .KnownFundingTxns}}
+        $("#pagesize-wrapper").removeClass("hidden")
+        $("#pagesize").change(function(ev) {
             Turbolinks.visit(
                 window.location.pathname
-                + "?txntype="+ $(ev.currentTarget).val()
-                + "&n=20"
-                + "&start=0"
+                + "?n="+ parseInt($(ev.currentTarget).val())
+                + "&start=" + {{.Offset}}
             )
         })
+        {{end}}
 
         function showAddressQRCode() {
             var $qrcode = $("#address-qrcode")
@@ -293,6 +259,7 @@
             })
             .html("")
         }
+        $(".jsonly").show()
     </script>
     {{end}}
     {{ template "footer" . }}

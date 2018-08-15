@@ -115,12 +115,7 @@ func BuildStakeTree(blocks map[int64]*lddlutil.Block, netParams *chaincfg.Params
 				delete(liveTicketMap, revokedTickets[i])
 			}
 
-			hB, errx := block.BlockHeaderBytes()
-			if errx != nil {
-				return fmt.Errorf("unable to serialize block header: %v", errx)
-			}
-
-			bestNode, err = bestNode.ConnectNode(stake.CalcHash256PRNGIV(hB),
+			bestNode, err = bestNode.ConnectNode(block.MsgBlock().Header,
 				spentTickets, revokedTickets, ticketsToAdd)
 			if err != nil {
 				return fmt.Errorf("couldn't connect node: %v", err.Error())

@@ -20,7 +20,7 @@ import (
 	"github.com/Legenddigital/lddld/lddljson"
 	"github.com/Legenddigital/lddld/lddlutil"
 	"github.com/Legenddigital/lddld/rpcclient"
-	apitypes "github.com/Legenddigital/lddldata/api/types"
+	apitypes "github.com/Legenddigital/lddldata/lddldataapi"
 )
 
 // NewTx models data for a new transaction
@@ -154,8 +154,8 @@ func (p *mempoolMonitor) TxHandler(client *rpcclient.Client) {
 				// txHeight = tx.MsgTx().TxIn[0].BlockHeight // uh, no
 			case stake.TxTypeSSGen:
 				// Vote
-				ticketHash := &tx.MsgTx().TxIn[1].PreviousOutPoint.Hash
-				log.Tracef("Received vote %v for ticket %v", tx.Hash(), ticketHash)
+				voteHash := &tx.MsgTx().TxIn[1].PreviousOutPoint.Hash
+				log.Tracef("Received vote %v for ticket %v", tx.Hash(), voteHash)
 				// TODO: Show subsidy for this vote (Vout[2] - Vin[1] ?)
 				continue
 			case stake.TxTypeSSRtx:
@@ -301,18 +301,23 @@ func (m *MempoolData) GetNumTickets() uint32 {
 	return m.NumTickets
 }
 
+// GetNumTickets returns the number of votes
+func (m *MempoolData) GetNumVotes() uint32 {
+	return m.NumVotes
+}
+
 type mempoolDataCollector struct {
-	mtx           sync.Mutex
+	mtx          sync.Mutex
 	lddldChainSvr *rpcclient.Client
-	activeChain   *chaincfg.Params
+	activeChain  *chaincfg.Params
 }
 
 // NewMempoolDataCollector creates a new mempoolDataCollector.
 func NewMempoolDataCollector(lddldChainSvr *rpcclient.Client, params *chaincfg.Params) *mempoolDataCollector {
 	return &mempoolDataCollector{
-		mtx:           sync.Mutex{},
+		mtx:          sync.Mutex{},
 		lddldChainSvr: lddldChainSvr,
-		activeChain:   params,
+		activeChain:  params,
 	}
 }
 

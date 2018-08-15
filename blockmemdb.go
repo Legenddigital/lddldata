@@ -10,8 +10,8 @@ import (
 
 	"github.com/Legenddigital/lddld/lddljson"
 	"github.com/Legenddigital/lddld/wire"
-	apitypes "github.com/Legenddigital/lddldata/api/types"
 	"github.com/Legenddigital/lddldata/blockdata"
+	apitypes "github.com/Legenddigital/lddldata/lddldataapi"
 )
 
 // BlockDataToMemdb models the block data and block data basic as maps

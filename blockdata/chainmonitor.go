@@ -1,12 +1,9 @@
-// Copyright (c) 2018, The Decred developers
-// Copyright (c) 2018, The Legenddigital developers
 // Copyright (c) 2017, Jonathan Chappelow
 // See LICENSE for details.
 
 package blockdata
 
 import (
-	"reflect"
 	"sync"
 
 	"github.com/Legenddigital/lddld/chaincfg/chainhash"
@@ -20,7 +17,6 @@ type ReorgData struct {
 	OldChainHeight int32
 	NewChainHead   chainhash.Hash
 	NewChainHeight int32
-	WG             *sync.WaitGroup
 }
 
 // for getblock, ticketfeeinfo, estimatestakediff, etc.
@@ -182,19 +178,12 @@ out:
 			// Store block data with each saver
 			savers := p.dataSavers
 			if reorg {
-				// This check should be redundant with check above.
-				if reorgData.NewChainHead.IsEqual(hash) {
-					savers = p.reorgDataSavers
-				} else {
-					savers = nil
-				}
+				savers = p.reorgDataSavers
 			}
 			for _, s := range savers {
 				if s != nil {
 					// save data to wherever the saver wants to put it
-					if err = s.Store(blockData, msgBlock); err != nil {
-						log.Errorf("(%v).Store failed: %v", reflect.TypeOf(s), err)
-					}
+					s.Store(blockData, msgBlock)
 				}
 			}
 
@@ -210,9 +199,7 @@ out:
 
 }
 
-// ReorgHandler receives notification of a chain reorganization. A
-// reorganization is handled in blockdata by setting the reorganizing flag so
-// that block data is not collected as the new chain is connected.
+// ReorgHandler receives notification of a chain reorganization
 func (p *chainMonitor) ReorgHandler() {
 	defer p.wg.Done()
 out:
@@ -245,8 +232,6 @@ out:
 				newHash, newHeight)
 			log.Infof("Reorganize started in blockdata. OLD head block %v at height %d.",
 				oldHash, oldHeight)
-
-			reorgData.WG.Done()
 
 		case _, ok := <-p.quit:
 			if !ok {
