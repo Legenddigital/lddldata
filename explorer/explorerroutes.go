@@ -25,7 +25,7 @@ import (
 // netName returns the name used when referring to a Legenddigital network.
 func netName(chainParams *chaincfg.Params) string {
 	switch chainParams.Net {
-	case wire.TestNet2:
+	case wire.TestNet3:
 		return "Testnet"
 	default:
 		return strings.Title(chainParams.Name)

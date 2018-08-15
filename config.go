@@ -39,7 +39,7 @@ var (
 	defaultConfigFile        = filepath.Join(defaultHomeDir, defaultConfigFilename)
 	defaultLogDir            = filepath.Join(defaultHomeDir, defaultLogDirname)
 	defaultDataDir           = filepath.Join(defaultHomeDir, defaultDataDirname)
-	lddldHomeDir              = lddlutil.AppDataDir("lddld", false)
+	lddldHomeDir             = lddlutil.AppDataDir("lddld", false)
 	defaultDaemonRPCCertFile = filepath.Join(lddldHomeDir, "rpc.cert")
 
 	defaultHost               = "localhost"
@@ -110,10 +110,10 @@ type config struct {
 	// EmailSubject string `long:"emailsubj" description:"Email subject. (default \"lddldataapi transaction notification\")"`
 
 	// RPC client options
-	LddldUser         string `long:"lddlduser" description:"Daemon RPC user name"`
-	LddldPass         string `long:"lddldpass" description:"Daemon RPC password"`
-	LddldServ         string `long:"lddldserv" description:"Hostname/IP and port of lddld RPC server to connect to (default localhost:9109, testnet: localhost:19109, simnet: localhost:19556)"`
-	LddldCert         string `long:"lddldcert" description:"File containing the lddld certificate file"`
+	LddldUser        string `long:"lddlduser" description:"Daemon RPC user name"`
+	LddldPass        string `long:"lddldpass" description:"Daemon RPC password"`
+	LddldServ        string `long:"lddldserv" description:"Hostname/IP and port of lddld RPC server to connect to (default localhost:9109, testnet: localhost:19109, simnet: localhost:19556)"`
+	LddldCert        string `long:"lddldcert" description:"File containing the lddld certificate file"`
 	DisableDaemonTLS bool   `long:"nodaemontls" description:"Disable TLS for the daemon RPC client -- NOTE: This is only allowed if the RPC client is connecting to localhost"`
 }
 
@@ -130,7 +130,7 @@ var (
 		APIListen:          defaultAPIListen,
 		IndentJSON:         defaultIndentJSON,
 		CacheControlMaxAge: defaultCacheControlMaxAge,
-		LddldCert:           defaultDaemonRPCCertFile,
+		LddldCert:          defaultDaemonRPCCertFile,
 		MonitorMempool:     defaultMonitorMempool,
 		MempoolMinInterval: defaultMempoolMinInterval,
 		MempoolMaxInterval: defaultMempoolMaxInterval,
@@ -457,15 +457,15 @@ func loadConfig() (*config, error) {
 // time of writing, lddld currently places blocks for testnet version 0 in the
 // data and log directory "testnet", which does not match the Name field of the
 // chaincfg parameters.  This function can be used to override this directory
-// name as "testnet2" when the passed active network matches wire.TestNet2.
+// name as "testnet2" when the passed active network matches wire.TestNet3.
 //
 // A proper upgrade to move the data and log directories for this network to
 // "testnet" is planned for the future, at which point this function can be
 // removed and the network parameter's name used instead.
 func netName(chainParams *netparams.Params) string {
 	switch chainParams.Net {
-	case wire.TestNet2:
-		return "testnet2"
+	case wire.TestNet3:
+		return "testnet3"
 	default:
 		return chainParams.Name
 	}
