@@ -9,9 +9,70 @@
 
 [[projects]]
   branch = "master"
+  name = "github.com/Legenddigital/base58"
+  packages = ["."]
+  revision = "a4687319920bab1c541d5258adb33bae272ff2ff"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/Legenddigital/lddld"
+  packages = [
+    "blockchain",
+    "blockchain/internal/dbnamespace",
+    "blockchain/internal/progresslog",
+    "blockchain/stake",
+    "blockchain/stake/internal/dbnamespace",
+    "blockchain/stake/internal/ticketdb",
+    "blockchain/stake/internal/tickettreap",
+    "chaincfg",
+    "chaincfg/chainec",
+    "chaincfg/chainhash",
+    "database",
+    "database/ffldb",
+    "database/internal/treap",
+    "gcs",
+    "gcs/blockcf",
+    "hdkeychain",
+    "lddlec",
+    "lddlec/edwards",
+    "lddlec/secp256k1",
+    "lddlec/secp256k1/schnorr",
+    "lddljson",
+    "lddlutil",
+    "rpcclient",
+    "txscript",
+    "wire"
+  ]
+  revision = "4d372971ed02c83c4e5b174bd18d61968dc44a9a"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/Legenddigital/lddlwallet"
+  packages = [
+    "errors",
+    "internal/helpers",
+    "internal/zero",
+    "netparams",
+    "wallet/internal/snacl",
+    "wallet/internal/txsizes",
+    "wallet/internal/walletdb",
+    "wallet/txauthor",
+    "wallet/txrules",
+    "wallet/udb"
+  ]
+  revision = "4e70c3346bb8b0976132dc2d77b5081e3cdd797b"
+
+[[projects]]
+  branch = "master"
+  name = "github.com/Legenddigital/slog"
+  packages = ["."]
+  revision = "fc479e23ea80f48bdb5e9608fce2e7e3fb470be7"
+
+[[projects]]
   name = "github.com/aead/siphash"
   packages = ["."]
-  revision = "e404fcfc888570cadd1610538e2dbc89f66af814"
+  revision = "83563a290f60225eb120d724600b9690c3fb536f"
+  version = "v1.0.1"
 
 [[projects]]
   branch = "master"
@@ -48,7 +109,6 @@
   revision = "4720035b7bfd2a9bb130b1c184f8bbe41b6f0d0f"
 
 [[projects]]
-  branch = "master"
   name = "github.com/btcsuite/goleveldb"
   packages = [
     "leveldb",
@@ -64,13 +124,14 @@
     "leveldb/table",
     "leveldb/util"
   ]
-  revision = "7834afc9e8cd15233b6c3d97e12674a31ca24602"
+  revision = "3fd0373267b6461dbefe91cef614278064d05465"
+  version = "v1.0.0"
 
 [[projects]]
-  branch = "master"
   name = "github.com/btcsuite/snappy-go"
   packages = ["."]
-  revision = "0bdef8d067237991ddaa1bb6072a740bc40601ba"
+  revision = "b3db38edf0a9a11a115eb6b022d8c946024a9ac0"
+  version = "v1.0.0"
 
 [[projects]]
   branch = "master"
@@ -103,62 +164,6 @@
   version = "v1.0.0"
 
 [[projects]]
-  name = "github.com/Legenddigital/base58"
-  packages = ["."]
-  revision = "56c501706f00d9e1cfacee19a27117e12da24734"
-  version = "v1.0.0"
-
-[[projects]]
-  branch = "master"
-  name = "github.com/Legenddigital/lddld"
-  packages = [
-    "blockchain",
-    "blockchain/internal/dbnamespace",
-    "blockchain/internal/progresslog",
-    "blockchain/stake",
-    "blockchain/stake/internal/dbnamespace",
-    "blockchain/stake/internal/ticketdb",
-    "blockchain/stake/internal/tickettreap",
-    "chaincfg",
-    "chaincfg/chainec",
-    "chaincfg/chainhash",
-    "database",
-    "database/ffldb",
-    "database/internal/treap",
-    "lddlec/edwards",
-    "lddlec/secp256k1",
-    "lddlec/secp256k1/schnorr",
-    "lddljson",
-    "lddlutil",
-    "gcs",
-    "gcs/blockcf",
-    "hdkeychain",
-    "rpcclient",
-    "txscript",
-    "wire"
-  ]
-  revision = "ca7eeee6af72d69a73fe339b453c1ca20d211d04"
-
-[[projects]]
-  branch = "master"
-  name = "github.com/Legenddigital/lddlwallet"
-  packages = [
-    "errors",
-    "internal/zero",
-    "netparams",
-    "wallet/internal/snacl",
-    "wallet/internal/walletdb",
-    "wallet/udb"
-  ]
-  revision = "69603e2d6d62eefe34f94dc245fc8f8f9180a57c"
-
-[[projects]]
-  name = "github.com/Legenddigital/slog"
-  packages = ["."]
-  revision = "fbd821ef791ba2b8ae945f5d44f4e49396d230c5"
-  version = "v1.0.0"
-
-[[projects]]
   name = "github.com/dgraph-io/badger"
   packages = [
     ".",
@@ -168,8 +173,8 @@
     "table",
     "y"
   ]
-  revision = "3ff1bfbb11c02c78c11269096669396c2d2cbbd3"
-  version = "v1.5.0"
+  revision = "391b6d3b93e6014fe8c2971fcc0c1266e47dbbd9"
+  version = "v1.5.3"
 
 [[projects]]
   branch = "master"
@@ -198,7 +203,7 @@
   branch = "master"
   name = "github.com/dustin/go-humanize"
   packages = ["."]
-  revision = "02af3965c54e8cacf948b97fef38925c4120652c"
+  revision = "9f541cc9db5d55bce703bd99987c9d5cb8eea45e"
 
 [[projects]]
   name = "github.com/go-chi/chi"
@@ -228,8 +233,8 @@
     "internal",
     "signal"
   ]
-  revision = "0e2aa5d22efec1603f7ded7097c500e9a36a13b3"
-  version = "v0.3.3"
+  revision = "89672dbe3c4ba97d53af7e839e8097e1ccbb4977"
+  version = "v0.3.5"
 
 [[projects]]
   branch = "master"
@@ -322,8 +327,8 @@
 [[projects]]
   name = "github.com/rs/cors"
   packages = ["."]
-  revision = "ca016a06a5753f8ba03029c0aa5e54afb1bf713f"
-  version = "v1.4.0"
+  revision = "3fb1b69b103a84de38a19c3c6ec073dd6caa4d3f"
+  version = "v1.5.0"
 
 [[projects]]
   branch = "master"
@@ -334,8 +339,8 @@
 [[projects]]
   name = "github.com/sirupsen/logrus"
   packages = ["."]
-  revision = "c155da19408a8799da419ed3eeb0cb5db0ad5dbc"
-  version = "v1.0.5"
+  revision = "3e01752db0189b9157070a0e1668a620f9a85da2"
+  version = "v1.0.6"
 
 [[projects]]
   branch = "master"
@@ -350,7 +355,7 @@
     "scrypt",
     "ssh/terminal"
   ]
-  revision = "37a17fe027db43f76fd88b056ddf588563fc8722"
+  revision = "de0752318171da717af4ce24d0a2e8626afaeb11"
 
 [[projects]]
   branch = "master"
@@ -361,7 +366,7 @@
     "trace",
     "websocket"
   ]
-  revision = "db08ff08e8622530d9ed3a0e8ac279f6d4c02196"
+  revision = "c39426892332e1bb5ec0a434a079bf82f5d30c54"
 
 [[projects]]
   branch = "master"
@@ -370,7 +375,7 @@
     "unix",
     "windows"
   ]
-  revision = "56ede360ec1c541828fb88741b3f1049406d28f5"
+  revision = "14742f9018cd6651ec7364dc6ee08af0baaa1031"
 
 [[projects]]
   branch = "master"
@@ -381,6 +386,6 @@
 [solve-meta]
   analyzer-name = "dep"
   analyzer-version = 1
-  inputs-digest = "cfc1e18f957ecfad34fe3d9e6c351677b5cc4b880853718df092c7e3b8e332d4"
+  inputs-digest = "e020f11afb69b0858c10f6c76367013497f8db3318779e11ccb54328a21cdc1b"
   solver-name = "gps-cdcl"
   solver-version = 1
